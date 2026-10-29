@@ -60,7 +60,7 @@ function toast(msg, isError = false) {
   t.textContent = msg;
   t.className = "toast show" + (isError ? " error" : "");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (t.className = "toast"), isError ? 6000 : 2200);
+  toast.timer = setTimeout(() => (t.className = "toast"), isError ? 9000 : 2600);
 }
 
 function el(tag, cls, text) {
@@ -165,6 +165,32 @@ function setBar(container, done, review, total) {
   r.style.width = total ? (100 * review / total) + "%" : "0";
 }
 
+/**
+ * Where a project / section / scene stands. "Done" and "translated" are not the same: a line
+ * flagged "needs review" is translated but not done, so a section is only complete when
+ * nothing is left to translate AND nothing is left to review.
+ *   complete  every line done
+ *   review    everything translated, some lines still need review
+ *   open      lines still untranslated
+ */
+function progress(c) {
+  const review = c.review || 0;
+  const left = Math.max(0, c.total - c.done - review);
+  const pct = c.total ? Math.floor(100 * c.done / c.total) : 0; // floor: never "100%" while one line is open
+  const state = left ? "open" : review ? "review" : "complete";
+  const n = (x) => x.toLocaleString();
+  return {
+    state, review, left, pct,
+    // sidebar scenes and the section list: short
+    short: state === "complete" ? "✓ Complete" : state === "review" ? `⚑ ${n(review)} to review`
+      : `${n(c.done)}/${n(c.total)}` + (review ? ` · ⚑ ${n(review)}` : ""),
+    // project list and section stats: a bit more
+    text: state === "complete" ? `✓ Complete · ${n(c.total)} lines`
+      : state === "review" ? `All translated · ⚑ ${n(review)} still to review`
+      : `${pct}% done · ${n(left)} untranslated` + (review ? ` · ⚑ ${n(review)} to review` : ""),
+  };
+}
+
 function miniBar(done, review, total) {
   const mini = el("span", "mini");
   mini.append(el("span", "seg-done"), el("span", "seg-review"));
@@ -260,12 +286,12 @@ async function showStart() {
       card.append(el("span", "warn small", "Can't open: " + p.error));
       card.disabled = true;
     } else {
-      const pct = p.total ? Math.floor(100 * p.done / p.total) : 0;
+      const pr = progress(p);
       const meta = el("span", "project-meta");
-      meta.append(miniBar(p.done, p.review, p.total),
-        el("span", "", `${pct}% · ${p.done.toLocaleString()}/${p.total.toLocaleString()}`));
+      meta.append(miniBar(p.done, p.review, p.total), el("span", "progress-label " + pr.state, pr.text));
       const foot = el("span", "project-foot muted small");
-      foot.append((p.review ? `${p.review.toLocaleString()} to review · ` : "") + "edited " + timeAgo(p.modified));
+      foot.append("edited " + timeAgo(p.modified));
+      if (p.shared) foot.append(el("span", "shared-tag", p.behind ? `⇅ team · ${p.behind} update${p.behind === 1 ? "" : "s"} waiting` : "⇅ team"));
       if (p.online?.length) {
         const here = el("span", "online");
         p.online.forEach((n) => here.append(avatar(n, "avatar sm")));
@@ -307,6 +333,7 @@ async function openFromDisk() {
   try {
     const res = await api("/api/open", body, { noProject: true });
     if (res.cancelled) return;
+    if (res.project) { await openProject(res.project); return; } // a teammate's shared project
     draft = res;
   } catch (err) {
     toast(err.message, true);
@@ -367,6 +394,8 @@ function showSetup() {
     document.querySelector("input[name=save-to][value=next]").checked = true;
     $("#save-original-name").textContent = d.origin;
     $("#save-original-warn").hidden = d.format === "csv";
+    $("#save-inplace").hidden = d.format !== "csv";
+    $("#save-inplace-name").textContent = d.filename.replace(/\.[^.]+$/, "") + ".translation.json";
     updateSetupSaveName();
   }
   renderPreview();
@@ -504,15 +533,20 @@ async function loadSummary() {
     total: a.total + g.total, done: a.done + g.done, review: a.review + g.review,
   }), { total: 0, done: 0, review: 0 });
   setBar($("#progress"), t.done, t.review, t.total);
-  const pct = t.total ? Math.floor(100 * t.done / t.total) : 0;
-  $("#progress-text").textContent =
-    `${t.done.toLocaleString()} of ${t.total.toLocaleString()} lines done (${pct}%) · ${t.review.toLocaleString()} need review`;
+  const pr = progress(t);
+  const pt = $("#progress-text");
+  pt.className = "progress-text " + pr.state;
+  pt.textContent = pr.state === "complete" ? `✓ Complete – all ${t.total.toLocaleString()} lines done`
+    : pr.state === "review" ? `All ${t.total.toLocaleString()} lines translated · ⚑ ${pr.review.toLocaleString()} still need review`
+    : `${t.done.toLocaleString()} of ${t.total.toLocaleString()} lines done (${pr.pct}%) · ` +
+      `${pr.left.toLocaleString()} untranslated` + (pr.review ? ` · ⚑ ${pr.review.toLocaleString()} to review` : "");
 
   const sel = $("#group-select");
   const keep = currentGroup;
   sel.textContent = "";
   for (const g of summary.groups) {
-    const o = el("option", "", `${g.name}  (${Math.floor(100 * g.done / g.total)}%)`);
+    const gp = progress(g);
+    const o = el("option", "", `${g.name} — ${gp.state === "open" ? gp.pct + "%" + (gp.review ? " · ⚑ " + gp.review : "") : gp.short}`);
     o.value = g.name;
     sel.append(o);
   }
@@ -520,14 +554,18 @@ async function loadSummary() {
   $("#apply-btn").hidden = !summary.apply_label;
   if (summary.apply_label) $("#apply-btn").textContent = summary.apply_label;
   renderSaveState(summary.save);
+  renderGit(summary.git);
   showGroupStats();
 }
 
 function showGroupStats() {
   const g = summary.groups.find((x) => x.name === $("#group-select").value);
   if (!g) return;
-  $("#group-stats").textContent =
-    `${g.done} done · ${g.review} to review · ${g.untranslated} untranslated · ${g.total} total`;
+  const pr = progress(g);
+  const box = $("#group-stats");
+  box.textContent = "";
+  box.append(el("div", "progress-label " + pr.state, pr.text),
+    el("div", "", `${g.done} done · ${g.review} to review · ${g.untranslated} untranslated · ${g.total} total`));
 }
 
 async function loadScenes(group) {
@@ -539,8 +577,9 @@ async function loadScenes(group) {
 }
 
 function sceneMeta(s) {
+  const pr = progress(s);
   const meta = el("span", "scene-meta");
-  meta.append(miniBar(s.done, s.review, s.total), el("span", "", `${s.done}/${s.total}`));
+  meta.append(miniBar(s.done, s.review, s.total), el("span", "progress-label " + pr.state, pr.short));
   return meta;
 }
 
@@ -552,11 +591,18 @@ function renderScenes() {
   const frag = document.createDocumentFragment();
   for (const s of scenes) {
     if (filter && !s.title.toLowerCase().includes(filter)) continue;
-    const b = el("button", "scene" + (s.id === currentScene ? " active" : ""));
+    const b = el("button", `scene is-${progress(s).state}` + (s.id === currentScene ? " active" : ""));
     b.type = "button";
     b.dataset.id = s.id;
     const here = el("span", "scene-people");
-    b.append(el("span", "scene-title", s.title || "(untitled)"), here, sceneMeta(s));
+    b.append(el("span", "scene-title", s.title || "(untitled)"), here);
+    if (s.claimed) {
+      const tag = el("span", "claim-tag", s.claimed.name === me ? "you" : s.claimed.name);
+      tag.style.borderColor = tag.style.color = personColor(s.claimed.name);
+      tag.title = `${s.claimed.name} is translating this scene`;
+      b.append(tag);
+    }
+    b.append(sceneMeta(s));
     b.addEventListener("click", () => openScene(s.id));
     sceneButtons.set(s.id, b);
     frag.append(b);
@@ -569,7 +615,40 @@ function renderScenes() {
 function updateSceneMeta() {
   for (const s of scenes) {
     const b = sceneButtons.get(s.id);
-    if (b) b.lastElementChild.replaceWith(sceneMeta(s));
+    if (!b) continue;
+    b.lastElementChild.replaceWith(sceneMeta(s));
+    b.classList.remove("is-complete", "is-review", "is-open");
+    b.classList.add("is-" + progress(s).state);
+  }
+  showClaim();
+}
+
+// ---------- "I'm translating this scene" ----------
+function showClaim() {
+  const btn = $("#claim-btn");
+  const s = !$("#search").value.trim() && scenes.find((x) => x.id === currentScene);
+  const team = summary?.git?.repo || summary?.shared;
+  btn.hidden = !s || !team;
+  if (btn.hidden) return;
+  const c = s.claimed;
+  btn.textContent = !c ? "✋ Claim this scene" : c.name === me ? "✓ You claimed this · release" : `✋ ${c.name} is on this`;
+  btn.title = !c ? "Tell your team you're translating this scene, so they pick another one"
+    : c.name === me ? "Let others take this scene again" : `${c.name} claimed it ${timeAgo(c.at)} – click to take it over`;
+}
+
+async function toggleClaim() {
+  const s = scenes.find((x) => x.id === currentScene);
+  if (!s) return;
+  const on = !s.claimed || s.claimed.name !== me;
+  if (on && s.claimed && !confirm(`${s.claimed.name} claimed this scene. Take it over?`)) return;
+  try {
+    const res = await api("/api/claim", { group: currentGroup, scene: s.id, on });
+    s.claimed = res.claimed;
+    renderScenes();
+    showClaim();
+    if (summary.git?.repo) toast(on ? "Claimed – your team sees it after you Sync" : "Released");
+  } catch (err) {
+    toast(err.message, true);
   }
 }
 
@@ -591,6 +670,7 @@ async function openScene(id, { keepScroll = false } = {}) {
   const s = scenes.find((x) => x.id === id);
   $("#crumb").textContent = currentGroup;
   $("#scene-title").textContent = s ? s.title || "(untitled)" : "";
+  showClaim();
   const state = $("#state-filter").value;
   try {
     const lines = await api(`/api/lines?group=${encodeURIComponent(currentGroup)}&subgroup=${encodeURIComponent(id)}&state=${state}&limit=20000`);
@@ -608,6 +688,7 @@ async function runSearch({ keepScroll = false } = {}) {
   try {
     const lines = await api(`/api/lines?search=${encodeURIComponent(q)}&state=${state}&limit=300`);
     $("#crumb").textContent = "Search";
+    $("#claim-btn").hidden = true;
     $("#scene-title").textContent = `“${q}” – ${lines.length}${lines.length === 300 ? "+" : ""} lines`;
     renderLines(lines, true, keepScroll);
   } catch (err) {
@@ -740,6 +821,7 @@ function buildCard(line, showWhere) {
 
   root.append(head, src, ref, note, conflictBox, ta, noteEdit, foot);
   Object.assign(card, { ta, chip, dirty, tagInfo, count, by, here, note, conflictBox, noteEdit, noteInput, sameBtn });
+  if (line.conflict) showGitConflict(card, line.conflict);
   refresh(card);
 
   ta.addEventListener("input", () => {
@@ -762,7 +844,7 @@ function refresh(card) {
   const { line, ta } = card;
   const text = ta.value;
   const isDirty = text !== card.saved;
-  const state = card.conflict ? "conflict" : isDirty ? "dirty" : line.state;
+  const state = card.conflict || card.gitConflict ? "conflict" : isDirty ? "dirty" : line.state;
   card.el.className = "card state-" + state + (card.el.classList.contains("focused") ? " focused" : "");
   card.chip.className = "chip " + line.state;
   card.chip.textContent = STATE_LABEL[line.state] +
@@ -859,6 +941,42 @@ function showConflict(card, theirs, mode = "auto") {
   );
   box.append(btns);
   refresh(card);
+}
+
+/** Found while syncing: a teammate translated this line differently. Stays until you choose. */
+function showGitConflict(card, c) {
+  card.gitConflict = c;
+  const box = card.conflictBox;
+  box.textContent = "";
+  box.hidden = false;
+  box.append(el("div", "", "A teammate translated this line differently (found when you synced). Their version:"),
+    el("div", "their-text", c.theirs || "(empty)"));
+  if (c.base) box.append(el("div", "muted small", "Before, it was: " + c.base));
+  const btns = el("div", "conflict-actions");
+  btns.append(
+    button("small ghost", "Use theirs", () => resolveGitConflict(card, false)),
+    button("small primary", "Keep mine", () => resolveGitConflict(card, true)),
+  );
+  box.append(btns);
+}
+
+async function resolveGitConflict(card, keepMine) {
+  if (!keepMine && !(await save(card, "auto"))) return;
+  try {
+    const res = await api("/api/resolve", { row: card.line.row, keep: keepMine ? "mine" : "theirs" });
+    card.gitConflict = null;
+    card.conflictBox.hidden = true;
+    card.line = res.line;
+    if (!keepMine) {
+      card.saved = card.ta.value = res.line.target;
+      autoGrow(card.ta);
+    }
+    refresh(card);
+    if (summary.git) renderGit({ ...summary.git, conflicts: Math.max(0, (summary.git.conflicts || 1) - 1) });
+    updateCounts();
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 function resolveConflict(card, keepMine, mode = "auto") {
@@ -1030,6 +1148,7 @@ async function poll() {
       people = res.people;
       renderPeople();
       renderSaveState(res.save);
+      if (res.git) renderGit(res.git);
     }
   } catch { /* offline: the bar says so, keep trying */ } finally {
     polling = false;
@@ -1063,6 +1182,8 @@ function applyRemote(line) {
   } else {
     card.line = line; // only the note or status changed
   }
+  if (line.conflict && !card.gitConflict) showGitConflict(card, line.conflict);
+  else if (!line.conflict && card.gitConflict) { card.gitConflict = null; card.conflictBox.hidden = !card.conflict; }
   refresh(card);
 }
 
@@ -1094,7 +1215,127 @@ function markCardPeople(list) {
   }
 }
 
+// ---------- git: translating with people anywhere ----------
+function renderGit(g) {
+  if (!summary) return;
+  summary.git = g || { repo: false };
+  const btn = $("#sync-btn");
+  btn.hidden = !summary.git.repo;
+  const bar = $("#conflict-bar");
+  bar.hidden = !g?.conflicts;
+  if (g?.conflicts) {
+    $("#conflict-text").textContent = `${g.conflicts} line${g.conflicts === 1 ? " was" : "s were"} translated ` +
+      "differently by you and a teammate. Choose which version to keep.";
+  }
+  if (!summary.git.repo) return;
+  const parts = [];
+  if (g.behind) parts.push(`↓${g.behind}`);
+  if (g.changed) parts.push(`↑${g.changed}`); else if (g.uncommitted || g.ahead) parts.push("↑");
+  $("#sync-badge").textContent = parts.join(" ");
+  btn.classList.toggle("has-news", !!g.behind);
+  const tips = [];
+  tips.push(g.changed ? `${g.changed} of your changed lines aren't shared yet` : g.uncommitted || g.ahead
+    ? "You have changes that aren't shared yet" : "Everything you did is shared");
+  if (g.behind) tips.push(`${g.behind} update${g.behind === 1 ? "" : "s"} from teammates waiting`);
+  if (g.fetch_error) tips.push("⚠ " + g.fetch_error);
+  if (g.last_sync) tips.push("Last sync " + timeAgo(g.last_sync));
+  btn.title = tips.join("\n") + "\nClick to share your lines and get your team's.";
+}
+
+async function syncNow() {
+  if (!projectId) return;
+  if (!(await flushAll())) return;
+  const btn = $("#sync-btn");
+  const label = btn.querySelector(".sync-label");
+  btn.disabled = true;
+  label.textContent = "⇅ Syncing…";
+  toast("Syncing with your team… (a GitHub sign-in window may open the first time)");
+  try {
+    const res = await api("/api/sync", {});
+    renderGit(res.git);
+    if (res.local_only) toast(res.message);
+    else {
+      toast(`✓ Synced · shared ${res.sent} line${res.sent === 1 ? "" : "s"} · got ${res.received} from teammates` +
+        (res.conflicts ? ` · ${res.conflicts} to decide` : ""), res.conflicts > 0);
+    }
+    try { glossary = await api("/api/glossary"); } catch { /* keep */ }
+    await reloadView();
+    if ($("#share-dialog").open) openShare();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    label.textContent = "⇅ Sync";
+  }
+}
+
+async function renderTeamGit() {
+  const box = $("#team-git");
+  box.textContent = "";
+  const g0 = summary.git || {};
+  if (!g0.repo) {
+    box.append(el("h4", "", "Translate with people anywhere"));
+    if (summary.save.mode === "direct") {
+      box.append(el("p", "", "This CSV isn't in a git repository yet. Put its folder in a GitHub repository " +
+        "(e.g. with GitHub Desktop: File → Add local repository → create one → Publish), then open the editor again."));
+    } else {
+      const ol = el("ol");
+      ol.append(el("li", "", "Put your CSV in a GitHub repository and download (clone) it, e.g. with GitHub Desktop."),
+        el("li", "", "In the editor, press Open a file… (start screen) and pick the CSV from that folder."),
+        el("li", "", "Choose “Work on this file itself – for a team sharing it on GitHub”, then push once (Sync)."),
+        el("li", "", "Teammates clone the same repository, open the same CSV in their own editor, and press Sync now and then."));
+      box.append(el("p", "", "This project is a private copy on this computer. To share it:"), ol);
+    }
+    return;
+  }
+  box.append(el("p", "muted", "Loading…"));
+  let g;
+  try { g = await api("/api/git"); } catch (err) { box.textContent = ""; box.append(el("p", "warn", err.message)); return; }
+  renderGit({ ...summary.git, ...g, log: undefined });
+  box.textContent = "";
+  const head = el("p");
+  head.append("Shared through git: ", el("code", "", g.remote || "(no GitHub remote yet)"));
+  if (g.branch) head.append(" · branch ", el("b", "", g.branch));
+  box.append(head);
+  const st = el("ul", "git-status");
+  const item = (cls, text) => st.append(el("li", cls, text));
+  if (g.changed) item("", `↑ ${g.changed} of your changed lines aren't shared yet`);
+  else if (g.uncommitted || g.ahead) item("", "↑ You have changes that aren't shared yet");
+  else item("ok", "✓ Everything you did is shared");
+  if (g.behind) item("news", `↓ ${g.behind} update${g.behind === 1 ? "" : "s"} from teammates waiting`);
+  if (g.conflicts) item("warn", `${g.conflicts} line${g.conflicts === 1 ? "" : "s"} translated differently – choose which version to keep`);
+  if (g.no_upstream) item("muted", "Not uploaded to GitHub yet – Sync uploads it");
+  if (g.fetch_error) item("warn", "⚠ " + g.fetch_error);
+  if (g.last_sync) item("muted", "Last sync " + timeAgo(g.last_sync));
+  const sync = button("primary", "⇅ Sync now", syncNow);
+  box.append(st, sync);
+  if (g.log?.length) {
+    box.append(el("h4", "", "Recent activity"));
+    const ul = el("ul", "people-list activity");
+    for (const e of g.log) {
+      const li = el("li");
+      li.append(avatar(e.author, "avatar sm"), el("b", "", " " + e.author), el("span", "muted", ` · ${timeAgo(e.at)} · `), e.message);
+      ul.append(li);
+    }
+    box.append(ul);
+  }
+  const help = el("details", "team-more");
+  const csvFile = (g.files || [])[0] || summary.file;
+  const ol = el("ol");
+  ol.append(
+    el("li", "", "Install Python and download this Translation Editor (from its GitHub page: Code → Download ZIP)."),
+    el("li", "", `Download (clone) the translation repository${g.remote ? " " + g.remote : ""} – easiest with GitHub Desktop: File → Clone repository.`),
+    el("li", "", `Start the editor, press Open a file… and pick ${csvFile} in that folder. Everything else is already set up.`),
+    el("li", "", "Translate, and press ⇅ Sync now and then (at least when you start and when you stop)."));
+  help.append(el("summary", "", "How teammates join"), ol,
+    el("p", "hint", "To let them upload, the repository owner adds them on GitHub: the repository → Settings → " +
+      "Collaborators. Tip: claim a scene (button above the lines) so two people don't translate the same one."));
+  box.append(help);
+}
+
 async function openShare() {
+  renderTeamGit();
+  $("#team-lan").open = !!summary.shared && !summary.git?.repo;
   const d = $("#share-dialog");
   const box = $("#share-body");
   box.textContent = "";
@@ -1136,7 +1377,7 @@ async function openShare() {
       el("span", "muted", scene ? ` · ${scene.title}` : p.row != null ? ` · line #${p.row + 1}` : ""));
     list.append(li);
   }
-  d.showModal();
+  if (!d.open) d.showModal();
 }
 
 // ---------- glossary ----------
@@ -1320,6 +1561,7 @@ async function mergeFile(file) {
 }
 
 function openMerge() {
+  $("#share-dialog").close();
   $("#merge-result").textContent = "";
   $("#merge-dialog").showModal();
 }
@@ -1408,6 +1650,18 @@ function init() {
   $("#save-path").addEventListener("focus", () => { document.querySelector("input[name=save-choice][value=custom]").checked = true; });
   document.querySelectorAll("input[name=fallback]").forEach((r) => r.addEventListener("change", updateExportLink));
   $("#merge-btn").addEventListener("click", openMerge);
+  $("#sync-btn").addEventListener("click", syncNow);
+  $("#claim-btn").addEventListener("click", toggleClaim);
+  $("#conflict-show").addEventListener("click", () => {
+    $("#search").value = "";
+    $("#state-filter").value = "conflicts";
+    $("#crumb").textContent = "Translated differently";
+    api("/api/lines?state=conflicts&limit=2000").then((lines) => {
+      $("#scene-title").textContent = `${lines.length} line${lines.length === 1 ? "" : "s"} to decide`;
+      $("#claim-btn").hidden = true;
+      renderLines(lines, true);
+    }).catch((err) => toast(err.message, true));
+  });
   $("#share-btn").addEventListener("click", openShare);
   $("#me-btn").addEventListener("click", askName);
   $("#name-save").addEventListener("click", saveName);

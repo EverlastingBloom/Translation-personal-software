@@ -10,6 +10,7 @@ folder and edited there; once you pick where the translation goes (Save), the ed
 file up to date by itself. Only the Python standard library is used, so there is nothing to install.
 """
 import csv
+import hashlib
 import io
 import json
 import os
@@ -31,10 +32,13 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)  # find formats.py however the script is started
 import formats  # noqa: E402
+import gitsync  # noqa: E402
 
 WEB_DIR = os.path.join(APP_DIR, "web")
 PROJECTS_DIR = os.path.join(APP_DIR, "projects")
 WORKSPACE_DIR = os.path.join(APP_DIR, "workspace")
+LOCAL_DIR = os.path.join(WORKSPACE_DIR, ".local")       # this computer only: edit journals
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")  # this computer only: projects opened from elsewhere
 REVIEW_STATES = {"review", "google", "machine", "CHECK TAGS"}
 PAGE_SIZE = 50  # lines per page when a file has no scene/section column
 MAX_UPLOAD = 200 * 1024 * 1024
@@ -45,6 +49,8 @@ RETRY_WRITE = 5     # seconds between attempts when a file is locked (open in Ex
 ONLINE_SECONDS = 20  # someone counts as online this long after their browser last checked in
 SHARE = None        # access code when started with --share
 COUNT_KEYS = ("total", "untranslated", "review", "done")
+GIT_STATUS_EVERY = 15   # seconds between local git status checks
+GIT_FETCH_EVERY = 180   # seconds between asking GitHub whether teammates uploaded something
 
 
 def new_counts():
@@ -89,9 +95,23 @@ class Project:
         self.apply = cfg.get("apply")
         if self.apply:
             self.apply_cwd = os.path.normpath(os.path.join(self.base, self.apply.get("cwd", ".")))
-        # Who wrote which line, and notes, live next to the CSV so the CSV itself stays clean.
-        self.meta_path = os.path.splitext(self.csv_path)[0] + ".notes.json"
-        self.journal_path = self.csv_path + ".journal"
+        self.delimiter = cfg.get("delimiter") or ("," if self.source else None)
+        # Who wrote which line, notes and who works on which scene live next to the CSV, so the
+        # CSV itself stays clean and a team sharing the folder (git) shares them too.
+        stem = os.path.splitext(self.csv_path)[0]
+        self.meta_path = stem + ".notes.json"
+        self.claims_path = stem + ".claims.json"
+        # Unwritten edits are kept on this computer only - never inside a shared folder.
+        key = hashlib.sha1(os.path.normcase(self.csv_path).encode("utf-8")).hexdigest()[:16]
+        name = re.sub(r"[^\w-]+", "-", os.path.basename(stem))
+        self.journal_path = os.path.join(LOCAL_DIR, f"{name}-{key}.journal")
+        # Projects whose CSV lives in a git repository (e.g. on GitHub) get the Sync button.
+        self.repo = gitsync.repo_root(self.csv_path) if not self.source else None
+        self.git_lock = threading.Lock()
+        self.git = {"repo": bool(self.repo)}
+        self.git_checked = self.git_fetched = 0
+        self.syncing = False
+        self.conflicts = {}
         self.lock = threading.RLock()
         self.version = 0
         self.reloaded_at = 0
@@ -107,14 +127,24 @@ class Project:
         self.output_error = None
         self.output_next_try = 0
         self.load()
+        if self.repo:
+            try:
+                gitsync.setup(self.repo, self.team_files())
+            except (gitsync.GitError, OSError):
+                pass
 
     # ---- data -------------------------------------------------------------------------------
     def load(self):
         with self.lock:
-            with open(self.csv_path, encoding="utf-8-sig", newline="") as fh:
-                reader = csv.DictReader(fh)
-                self.fieldnames = list(reader.fieldnames or [])
-                self.rows = list(reader)
+            if self.repo and self.has_conflict_markers():
+                # a pull outside the editor stopped halfway: finish it line by line
+                gitsync.resolve_unmerged(self.repo, self.team_files())
+            if self.has_conflict_markers():
+                raise formats.FormatError(f"{os.path.basename(self.csv_path)} has unresolved git conflicts "
+                                          "(<<<<<<< lines). Finish the merge in GitHub Desktop first.")
+            self.table = formats.read_table(self.csv_path, self.delimiter)
+            self.fieldnames = list(self.table.fieldnames)
+            self.rows = self.table.rows
             for role in ("target", "status"):
                 col = self.cols[role]
                 if col not in self.fieldnames:
@@ -132,14 +162,41 @@ class Project:
                         self.meta = {int(k): v for k, v in json.load(fh).items()}
                 except (ValueError, OSError):
                     pass
+            self.claims = self.read_json(self.claims_path, {})
+            if self.repo:
+                found = gitsync.load_conflicts(self.repo, gitsync.rel(self.repo, self.csv_path))
+                self.conflicts = {i: c for i, c in found.items() if i < len(self.rows)}
             self.csv_mtime = os.path.getmtime(self.csv_path)
             replayed = self.replay_journal()
             self.build_index()
             if replayed:
                 self.mark_dirty()
 
+    def has_conflict_markers(self):
+        with open(self.csv_path, "rb") as fh:
+            data = fh.read()
+        return data.startswith(b"<<<<<<< ") or b"\n<<<<<<< " in data
+
+    @staticmethod
+    def read_json(path, default):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return default
+
+    def team_files(self):
+        """Everything a team shares about this project (only the ones inside the repository)."""
+        files = [self.csv_path, self.meta_path, self.claims_path, self.glossary_path, self.config_path]
+        root = os.path.normcase(self.repo or "") + os.sep
+        return [f for f in files if os.path.normcase(f).startswith(root)]
+
     def replay_journal(self):
         """Edits not yet written into the CSV (the editor was closed in the meantime)."""
+        legacy = self.csv_path + ".journal"  # where older versions kept it
+        if os.path.exists(legacy) and not os.path.exists(self.journal_path):
+            os.makedirs(LOCAL_DIR, exist_ok=True)
+            shutil.move(legacy, self.journal_path)
         if not os.path.exists(self.journal_path):
             return 0
         n = 0
@@ -209,6 +266,7 @@ class Project:
 
     def commit(self, entry):
         """Record one change: journal first (survives a crash), then memory, disk a moment later."""
+        os.makedirs(LOCAL_DIR, exist_ok=True)
         with open(self.journal_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self.apply_entry(entry)
@@ -241,14 +299,12 @@ class Project:
     def save(self):
         if self.external_change():
             self.reload_from_disk()
-        buf = io.StringIO()
-        w = csv.DictWriter(buf, self.fieldnames, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(self.rows)
-        write_atomic(self.csv_path, buf.getvalue().encode("utf-8-sig"))
+        # only rows that changed are rewritten: small, clean diffs for git
+        write_atomic(self.csv_path, self.table.dump(self.fieldnames, self.rows))
         self.csv_mtime = os.path.getmtime(self.csv_path)
-        write_atomic(self.meta_path, json.dumps({str(k): v for k, v in sorted(self.meta.items())},
-                                                ensure_ascii=False, indent=0).encode("utf-8"))
+        if self.meta or os.path.exists(self.meta_path):
+            notes = gitsync.dump_json({str(k): v for k, v in self.meta.items()}, self.meta_path)
+            write_atomic(self.meta_path, notes)
         try:
             os.remove(self.journal_path)
         except FileNotFoundError:
@@ -259,6 +315,8 @@ class Project:
 
     def tick(self, force=False):
         """Called twice a second by the background writer."""
+        if self.syncing and not force:
+            return  # git is merging the file right now; edits wait in the journal
         with self.lock:
             now = time.time()
             if self.dirty_since is None:
@@ -312,6 +370,7 @@ class Project:
             "at": m.get("at"),
             "note": m.get("note", ""),
             "note_by": m.get("note_by", ""),
+            "conflict": self.conflicts.get(i),
         }
 
     # ---- api --------------------------------------------------------------------------------
@@ -329,13 +388,93 @@ class Project:
             "apply_label": self.apply.get("label", "Apply") if self.apply and owner else None,
             "version": self.version,
             "save": self.save_info(owner),
+            "git": self.git_info() if owner else {"repo": False},
         }
 
     def subgroups(self, group):
         g = self.groups.get(group)
         if not g:
             return []
-        return [dict(id=s["id"], title=s["title"], **s["counts"]) for s in g["subs"].values()]
+        return [dict(id=s["id"], title=s["title"], claimed=self.claims.get(self.claim_key(group, s["id"])),
+                     **s["counts"]) for s in g["subs"].values()]
+
+    @staticmethod
+    def claim_key(group, scene):
+        return f"{group}\t{scene}"
+
+    def claim(self, group, scene, user, on):
+        """"I'm translating this scene" - so teammates pick another one. Shared with the team via git."""
+        with self.lock:
+            key = self.claim_key(group, scene)
+            if on:
+                self.claims[key] = {"name": user, "at": time.time()}
+            else:
+                self.claims.pop(key, None)
+            write_atomic(self.claims_path, gitsync.dump_json(self.claims, self.claims_path))
+            self.version += 1
+            return {"claimed": self.claims.get(key)}
+
+    def resolve(self, row, keep, user):
+        """Settle a line two translators changed differently (found while syncing)."""
+        with self.lock:
+            c = self.conflicts.pop(row, None)
+            if c and keep == "theirs":
+                status = c.get("theirs_status") or "reviewed"
+                self.commit({"row": row, "target": c["theirs"], "status": status, "by": user, "at": time.time()})
+            else:
+                self.version += 1
+                self.changes.append((self.version, row))
+            if self.repo:
+                gitsync.save_conflicts(self.repo, gitsync.rel(self.repo, self.csv_path), self.conflicts)
+            return {"line": self.line(row)}
+
+    # ---- git ----------------------------------------------------------------------------------
+    def refresh_git(self, fetch=False):
+        """Background: how far this copy is from the team's (never blocks editing)."""
+        if not self.git_lock.acquire(blocking=False):
+            return
+        try:
+            info = gitsync.status(self.repo, self.team_files(), self.csv_path, fetch=fetch)
+            info["last_sync"] = self.git.get("last_sync")
+            if not fetch:
+                info["fetch_error"] = self.git.get("fetch_error", "")
+            self.git = info
+        except gitsync.GitError as e:
+            self.git = dict(self.git, error=str(e))
+        finally:
+            self.git_lock.release()
+
+    def git_info(self):
+        return dict(self.git, conflicts=len(self.conflicts))
+
+    def git_details(self):
+        with self.git_lock:
+            info = gitsync.status(self.repo, self.team_files(), self.csv_path, log=15)
+        info.update(conflicts=len(self.conflicts), last_sync=self.git.get("last_sync"),
+                    fetch_error=self.git.get("fetch_error", ""),
+                    files=[gitsync.rel(self.repo, f) for f in self.team_files()])
+        return info
+
+    def sync(self, user):
+        if not self.repo:
+            raise ValueError("This project isn't in a git repository, so there is nothing to sync.")
+        with self.git_lock:
+            self.tick(force=True)  # everything typed so far goes into this commit
+            with self.lock:
+                if self.write_error:
+                    raise ValueError(self.write_error)
+                self.syncing = True
+            try:
+                res = gitsync.sync(self.repo, self.team_files(), self.csv_path, user)
+            finally:
+                with self.lock:
+                    self.syncing = False
+                    # teammates' lines came in: load the merged file, edits made meanwhile go on top
+                    self.reload_from_disk()
+            self.git = dict(gitsync.status(self.repo, self.team_files(), self.csv_path), last_sync=time.time())
+        self.git_checked = time.time()
+        res["conflicts"] = len(self.conflicts)
+        return res
 
     def lines(self, group=None, subgroup=None, search=None, state=None, limit=300):
         if search:
@@ -360,6 +499,8 @@ class Project:
             if state == "todo" and st == "done":
                 continue
             if state == "notes" and not self.meta.get(i, {}).get("note"):
+                continue
+            if state == "conflicts" and i not in self.conflicts:
                 continue
             if state in ("untranslated", "review", "done") and st != state:
                 continue
@@ -492,7 +633,7 @@ class Project:
 
     # ---- saving to the user's file ----------------------------------------------------------
     def export_bytes(self, fallback_to_source):
-        source = self.source or {"format": "csv", "delimiter": ",", "had_status": True}
+        source = self.source or {"format": "csv", "delimiter": self.table.delimiter, "had_status": True}
         original = os.path.join(self.base, self.source["file"]) if self.source else None
         return formats.export(source, original, self.fieldnames, self.rows, self.cols, fallback_to_source)
 
@@ -500,7 +641,7 @@ class Project:
         stem = os.path.splitext(self.display_file())[0] or "translation"
         label = re.sub(r"[^\w-]+", "-", self.cols.get("labels", {}).get("target", "translated")).strip("-").lower()
         ext = ".json" if self.source and self.source.get("format", "").startswith("json") else \
-            ".tsv" if self.source and self.source.get("delimiter") == "\t" else ".csv"
+            ".tsv" if (self.source or {"delimiter": self.table.delimiter}).get("delimiter") == "\t" else ".csv"
         return f"{stem}.{label or 'translated'}{ext}"
 
     def export(self, fallback_to_source):
@@ -598,25 +739,76 @@ class Project:
         return {"ok": res.returncode == 0, "output": (res.stdout + res.stderr)[-4000:]}
 
 
+def is_project_file(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return isinstance(cfg, dict) and "csv" in cfg and "columns" in cfg
+
+
+def project_file_for(csv_path):
+    """A shared project file (x.translation.json) next to this CSV, if a teammate already made one."""
+    folder = os.path.dirname(csv_path)
+    for name in sorted(os.listdir(folder)):
+        if name.endswith(gitsync.CONFIG_SUFFIX):
+            p = os.path.join(folder, name)
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if os.path.normcase(os.path.normpath(os.path.join(folder, cfg.get("csv", "")))) == os.path.normcase(csv_path):
+                return p
+    return None
+
+
 class Library:
-    """All projects the editor knows: saved configs in projects/ and opened files in workspace/."""
+    """All projects the editor knows: saved configs in projects/, opened files in workspace/, and
+    shared project files elsewhere on this computer (e.g. in a cloned GitHub repository)."""
 
     def __init__(self):
         self.loaded = {}
         self.lock = threading.Lock()
         self.extra = []  # project files opened from the command line, wherever they are
 
+    def remembered(self):
+        try:
+            with open(SETTINGS_PATH, encoding="utf-8") as fh:
+                return [p for p in json.load(fh).get("projects", []) if os.path.isfile(p)]
+        except (OSError, ValueError, AttributeError):
+            return []
+
+    def remember(self, path):
+        path = os.path.normpath(os.path.abspath(path))
+        try:
+            with open(SETTINGS_PATH, encoding="utf-8") as fh:
+                settings = json.load(fh)
+        except (OSError, ValueError):
+            settings = {}
+        projects = settings.setdefault("projects", [])
+        if path not in projects:
+            projects.append(path)
+            write_atomic(SETTINGS_PATH, json.dumps(settings, ensure_ascii=False, indent=2).encode("utf-8"))
+
     def config_paths(self):
-        paths = list(self.extra)
+        paths = list(self.extra) + self.remembered()
         if os.path.isdir(PROJECTS_DIR):
             paths += [os.path.join(PROJECTS_DIR, f) for f in sorted(os.listdir(PROJECTS_DIR))
-                      if f.endswith(".json") and not f.endswith((".glossary.json", ".notes.json"))]
+                      if f.endswith(".json") and not f.endswith((".glossary.json", ".notes.json", ".claims.json"))]
         if os.path.isdir(WORKSPACE_DIR):
             for d in sorted(os.listdir(WORKSPACE_DIR)):
                 p = os.path.join(WORKSPACE_DIR, d, "project.json")
                 if os.path.isfile(p):
                     paths.append(p)
-        return paths
+        seen, out = set(), []
+        for p in paths:
+            key = os.path.normcase(os.path.normpath(p))
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+        return out
 
     @staticmethod
     def pid(path):
@@ -630,7 +822,7 @@ class Library:
             if pid in self.loaded:
                 return self.loaded[pid]
         path = os.path.normpath(os.path.join(APP_DIR, pid or ""))
-        if path not in [os.path.normpath(p) for p in self.config_paths()]:
+        if os.path.normcase(path) not in [os.path.normcase(os.path.normpath(p)) for p in self.config_paths()]:
             raise KeyError("Unknown project")
         with self.lock:
             if pid not in self.loaded:
@@ -646,7 +838,8 @@ class Library:
             try:
                 proj = self.get(pid)
                 entry.update(name=proj.name, file=proj.display_file(), modified=os.path.getmtime(proj.csv_path),
-                             online=proj.online(), **proj.counts())
+                             online=proj.online(), shared=bool(proj.repo), behind=proj.git.get("behind", 0),
+                             **proj.counts())
             except Exception as e:  # e.g. a saved project whose CSV isn't on this computer
                 entry.update(name=os.path.splitext(os.path.basename(p))[0], error=str(e))
             out.append(entry)
@@ -654,14 +847,23 @@ class Library:
         return out
 
     def writer(self):
-        """Background thread: writes edited projects to disk shortly after the last change."""
+        """Background thread: writes edited projects to disk shortly after the last change, and
+        now and then checks whether teammates uploaded something (git projects)."""
         while True:
             time.sleep(0.5)
+            now = time.time()
             for proj in list(self.loaded.values()):
                 try:
                     proj.tick()
                 except Exception as e:  # never let one broken project stop the others being saved
                     print(f"Could not save {proj.name}: {e}")
+                if proj.repo and not proj.syncing:
+                    fetch = now - proj.git_fetched >= GIT_FETCH_EVERY
+                    if fetch or now - proj.git_checked >= GIT_STATUS_EVERY:
+                        proj.git_checked = now
+                        if fetch:
+                            proj.git_fetched = now
+                        threading.Thread(target=proj.refresh_git, args=(fetch,), daemon=True).start()
 
     def flush_all(self):
         for proj in list(self.loaded.values()):
@@ -711,10 +913,21 @@ class Library:
             "tag_guess": formats.guess_tag_preset(rows, guess.get("source", "")),
         }
 
-    def import_path(self, path):
-        path = os.path.normpath((path or "").strip().strip('"'))
+    def open_path(self, path):
+        """Open a file from disk: a shared project file, a CSV that already has one next to it
+        (a teammate set it up - you join their project), or any other file (new project)."""
+        path = os.path.normpath(os.path.abspath((path or "").strip().strip('"')))
         if not os.path.isfile(path):
             raise ValueError(f"There is no file at {path}")
+        cfg = path if path.lower().endswith(".json") and is_project_file(path) else project_file_for(path)
+        if cfg:
+            self.remember(cfg)
+            pid = self.pid(cfg)
+            self.get(pid)
+            return {"project": pid}
+        return self.import_path(path)
+
+    def import_path(self, path):
         with open(path, "rb") as fh:
             raw = fh.read()
         return self.import_file(os.path.basename(path), raw, origin=path)
@@ -758,17 +971,48 @@ class Library:
             "source": source,
         }
         re.compile(cfg["tag_pattern"])  # refuse a broken custom pattern now, not later in the browser
+        save_to = data.get("save_to") or {}
+        if save_to.get("choice") == "inplace":
+            return self.create_shared(cfg, source, folder)
         with open(os.path.join(folder, "project.json"), "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, ensure_ascii=False, indent=2)
         os.remove(os.path.join(folder, "draft.json"))
         pid = self.pid(os.path.join(folder, "project.json"))
-        save_to = data.get("save_to")
         if save_to:
             proj = self.get(pid)
             path = save_to.get("path")
             if save_to.get("choice") in ("next", "original"):
                 path = next(s["path"] for s in proj.suggestions() if s["id"] == save_to["choice"])
             proj.set_output(path, save_to.get("auto", True))
+        return {"id": pid}
+
+    def create_shared(self, cfg, source, folder):
+        """Edit the opened CSV itself, with the project file next to it - so a team that shares
+        the folder (a GitHub repository) gets the whole setup when they download it."""
+        origin = source.get("origin")
+        if not origin or source.get("format") != "csv":
+            raise ValueError("Only a CSV/TSV opened with “Open a file…” can be edited in place.")
+        stem = os.path.splitext(origin)[0]
+        cfg_path = stem + gitsync.CONFIG_SUFFIX
+        if os.path.exists(cfg_path):
+            raise ValueError(f"{os.path.basename(cfg_path)} already exists – open that file instead.")
+        shared = {
+            "name": cfg["name"],
+            "csv": os.path.basename(origin),
+            "delimiter": source.get("delimiter", ","),
+            "glossary": os.path.basename(stem) + ".glossary.json",
+            "columns": cfg["columns"],
+            "tag_pattern": cfg["tag_pattern"],
+        }
+        write_atomic(cfg_path, (json.dumps(shared, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        shutil.rmtree(folder)  # the copy in workspace/ isn't needed
+        self.remember(cfg_path)
+        pid = self.pid(cfg_path)
+        proj = self.get(pid)
+        if proj.fieldnames != proj.table.fieldnames:  # add the translation/status columns right away
+            with proj.lock:
+                proj.mark_dirty()
+                proj.save()
         return {"id": pid}
 
     def discard_draft(self, slug):
@@ -920,9 +1164,14 @@ def make_handler(library):
                         res = p.poll(int(q.get("since", 0)), q.get("session", ""), self.user(),
                                      int(q["row"]) if q.get("row", "").isdigit() else None, q.get("scene", ""))
                         res["save"] = p.save_info(self.owner)
+                        if self.owner and p.repo:
+                            res["git"] = p.git_info()
                         return self.send_json(res)
                     if url.path == "/api/glossary":
                         return self.send_json(p.glossary())
+                    if url.path == "/api/git":
+                        self.owner_only()
+                        return self.send_json(p.git_details() if p.repo else {"repo": False})
                     if url.path == "/api/export":
                         data, name = p.export(q.get("fallback", "source") == "source")
                         self.send_response(200)
@@ -935,6 +1184,10 @@ def make_handler(library):
                     return self.send_json({"error": "not found"}, 404)
             except KeyError:
                 return self.send_json({"error": "This project doesn't exist any more."}, 404)
+            except PermissionError:
+                return self.send_json({"error": "Only the person running the editor can do this."}, 403)
+            except gitsync.GitError as e:
+                return self.send_json({"error": str(e)}, 400)
             except Exception as e:
                 return self.send_json({"error": str(e)}, 500)
             self.serve_static(url.path)
@@ -953,7 +1206,7 @@ def make_handler(library):
                     path = data.get("path") or PICKER.ask("open")
                     if not path:
                         return self.send_json({"cancelled": True})
-                    return self.send_json(library.import_path(path))
+                    return self.send_json(library.open_path(path))
                 if url.path == "/api/create":
                     return self.send_json(library.create(data))
                 if url.path == "/api/discard":
@@ -967,6 +1220,13 @@ def make_handler(library):
                     return self.send_json(res, 409 if res.get("conflict") else 200)
                 if url.path == "/api/note":
                     return self.send_json(p.set_note(int(data["row"]), data.get("note", ""), user))
+                if url.path == "/api/resolve":
+                    return self.send_json(p.resolve(int(data["row"]), data.get("keep"), user))
+                if url.path == "/api/claim":
+                    return self.send_json(p.claim(data.get("group", ""), data.get("scene", ""), user, bool(data.get("on"))))
+                if url.path == "/api/sync":
+                    self.owner_only()
+                    return self.send_json(dict(p.sync(user), git=p.git_info()))
                 if url.path == "/api/fill-same":
                     return self.send_json(p.fill_same(int(data["row"]), user))
                 if url.path == "/api/merge":
@@ -995,7 +1255,7 @@ def make_handler(library):
                 if str(e) == "owner":
                     return self.send_json({"error": "Only the person running the editor can do this."}, 403)
                 return self.send_json({"error": "The file is open in another program (Excel?). Close it and try again."}, 409)
-            except formats.FormatError as e:
+            except (formats.FormatError, gitsync.GitError) as e:
                 return self.send_json({"error": str(e)}, 400)
             except (KeyError, ValueError, IndexError, re.error) as e:
                 return self.send_json({"error": str(e).strip("'")}, 400)
@@ -1058,8 +1318,11 @@ def main():
     url = f"http://127.0.0.1:{port}/"
     if args:
         path = os.path.abspath(args[0])
+        if os.path.isfile(path) and not is_project_file(path):  # a CSV: open its shared project file
+            path = project_file_for(path) or sys.exit(f"{args[0]} has no project file next to it yet. "
+                                                      "Start the editor and use “Open a file…” to set it up.")
         if os.path.normpath(os.path.dirname(path)) != os.path.normpath(PROJECTS_DIR):
-            library.extra.append(path)
+            library.remember(path)
         pid = Library.pid(path)
         library.get(pid)  # fail early with a clear error if the config is broken
         url += "#p=" + quote(pid)

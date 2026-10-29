@@ -2,8 +2,8 @@
 
 A small app for translating game text by hand, one line at a time, instead of scrolling
 through a huge CSV or JSON file. **Open a file, translate, it saves itself.** It runs on your own
-computer, opens in your web browser, and needs nothing installed except Python. Teammates can
-join live over your Wi-Fi, or merge their work in later.
+computer, opens in your web browser, and needs nothing installed except Python. Translate as a
+team from anywhere through a GitHub repository (one **Sync** button), or live over your Wi-Fi.
 
 Works with any game whose text you can get into a **CSV, TSV or JSON** file – for example
 dialogue extracted from Stardew Valley, a mod's `i18n/default.json`, or a spreadsheet saved
@@ -73,32 +73,75 @@ The file comes back in the original format:
 Files dropped on the page don't tell the editor where they came from, so for those you pick the
 place the first time you press Save. Use **Open a file…** to link it straight away.
 
-## Working together
+## Working together – with people anywhere in the world
 
-Press **Team** in the top bar. Set your name once (click it to change) – it's shown next to the
-lines you translate and the notes you leave.
+Everyone runs their own copy of this editor. The game text lives in a **GitHub repository**
+(the "translation repo") that everybody downloads. The editor works on that CSV directly and the
+**⇅ Sync** button shares your lines and brings in everyone else's – no exporting, no emailing
+files around.
 
-**Live, on the same network** – double-click **`START_SHARED.bat`** (or `python translator.py --share`).
-The window shows a link; send it to your teammates on the same Wi-Fi / LAN. Then:
+What makes this comfortable:
 
-- lines others save appear on your screen within a few seconds (briefly highlighted),
-- you see who is online, and which scene and line each person is on ("Ana is here"),
-- if two people change the same line at once, the editor shows both versions and asks which to keep
-  – nobody's work is silently overwritten,
-- the glossary is shared.
+- **Small, clean changes.** Only the lines you translated are rewritten in the CSV; quoting,
+  line endings and encoding of every other line stay byte-for-byte the same.
+- **No git conflicts between lines.** The editor merges the CSV *game line by game line*, so two
+  people translating neighbouring lines (or different scenes) never get in each other's way.
+  Notes, scene claims and the glossary are merged the same way.
+- **Same line, two translations?** After a Sync the editor shows both versions on that line
+  (and a bar at the top: "1 line was translated differently") – click *Keep mine* or *Use theirs*.
+- **Who does what:** your name is shown next to the lines you translate; **✋ Claim this scene**
+  tells the team you're on it; notes travel with the file.
+- **Team panel:** what you haven't shared yet, updates from teammates waiting (the editor checks
+  GitHub every few minutes – the Sync button then shows ↓), and recent activity.
 
-Only people with the link (it contains a secret code) can get in. Choosing where files are saved,
-opening files and *Apply* stay with the person running the editor. If Windows asks, allow Python
-on private networks.
+### Set up (once, by the project owner)
 
-**Not on the same network?** Everyone translates their own copy, then use **Merge** to bring in
-a teammate's file (their saved/exported file, or any file with the same keys or original texts).
-Lines are matched by key, otherwise by identical original text; merged lines are marked
-*needs review* by default and your existing translations are kept unless you tick *Replace*.
+1. Create a GitHub repository with the game text CSV in it and download it to your computer –
+   easiest with [GitHub Desktop](https://desktop.github.com/): *File → New repository* (or
+   *Clone repository* if it already exists on GitHub).
+2. Start the editor, press **Open a file…** and pick the CSV inside that folder.
+3. On the setup screen choose **"Work on this file itself – for a team sharing it on GitHub"**.
+   The editor adds `<name>.translation.json` (the column setup) next to the CSV.
+4. Press **⇅ Sync**. That uploads the setup; the first time a GitHub sign-in window may appear.
+5. Invite your translators on GitHub: the repository → *Settings → Collaborators → Add people*.
+
+### Join (each translator)
+
+1. Install [Python 3](https://www.python.org/downloads/) (tick "Add python.exe to PATH") and
+   [GitHub Desktop](https://desktop.github.com/), and sign in to GitHub there.
+2. Download this editor: <https://github.com/EverlastingBloom/Translation-personal-software> →
+   *Code → Download ZIP*, unzip.
+3. In GitHub Desktop: *File → Clone repository* → the translation repo.
+4. Start the editor (`START_EDITOR.bat`), press **Open a file…** and pick the CSV in the cloned
+   folder. It opens with everything already set up.
+5. Translate, and press **⇅ Sync** when you start, now and then, and when you stop.
+
+Sync = save → commit your lines → bring in teammates' lines → upload. If something is in the way
+the editor says what to do in plain words (no permission → ask the owner to add you; not signed
+in → sign in once in GitHub Desktop; no internet; …). Pulling with GitHub Desktop or plain git is
+fine too: once the editor has opened the project on that computer, git uses its line-by-line
+merge, and if a pull ever stops with `<<<<<<<` conflict markers in the CSV, the editor finishes
+that merge itself the next time it opens the project.
+
+### Same Wi-Fi: translate live in one editor
+
+Double-click **`START_SHARED.bat`** (or `python translator.py --share`). The window shows a link;
+send it to teammates on the same network. Lines others save appear on your screen within
+seconds, you see who is on which line ("Ana is here"), and if two people change the same line at
+once the editor asks which version to keep. Only people with the link (it contains a secret
+code) get in; choosing files, Sync and *Apply* stay with the person running the editor. If
+Windows asks, allow Python on private networks.
+
+### Got a file from a teammate?
+
+**Team → Merge a file…** brings in someone's saved/downloaded file of this project (or any file
+with the same keys or original texts). Lines are matched by key, otherwise by identical original
+text; merged lines are marked *needs review* by default and your existing translations are kept
+unless you tick *Replace*.
 
 If a project's CSV is changed by another program while the editor is open (an import script,
-OneDrive or git bringing in a teammate's version), the editor notices and loads the new version;
-edits you made that weren't written yet are put back on top.
+OneDrive, GitHub Desktop), the editor notices and loads the new version; edits you made that
+weren't written yet are put back on top.
 
 ### Supported files
 
@@ -130,6 +173,7 @@ Pick the one that matches your game on the setup screen (it guesses for you):
 | Ctrl + Shift + Enter | Save, mark "needs review", go to the next line |
 | Alt + ↓ / ↑ | Next / previous line |
 | Ctrl + S | Save everything to the file |
+| (Team projects) ⇅ Sync | Share your lines, get your team's |
 | Ctrl + Shift + C | Copy the original text into the box |
 | Esc | Undo unsaved changes in this line |
 
@@ -141,11 +185,27 @@ project (`original.*`, the working copy `lines.csv`, `project.json`, `glossary.j
 choose *Into the original file*. To move a project to another computer, copy its folder into that
 computer's `workspace/`. To delete a project, delete its folder.
 
-Every edit is first written to a small journal file (`*.journal`) and put into the CSV a moment
-later, so saving stays fast on big files and nothing is lost if the window is closed or the
-computer crashes – the next start picks the journal up.
+Team projects (*Work on this file itself*) have no copy: the editor edits the CSV in the
+translation repo and keeps these next to it, all shared through git:
 
-`workspace/`, CSV files, game files and API keys are kept out of git by `.gitignore`.
+| File | What it is |
+|---|---|
+| `dialogue.csv` | The game text with your translation column |
+| `dialogue.translation.json` | Which column is what, the code preset – teammates open the project with it |
+| `dialogue.notes.json` | Notes, and who translated each line |
+| `dialogue.claims.json` | Who is working on which scene |
+| `dialogue.glossary.json` | The shared glossary |
+| `.gitattributes` | Tells git to merge these files line by line (see `gitsync.py`) |
+
+Lines still to decide after a Sync are kept inside `.git/` (only on your computer).
+
+Every edit is first written to a small journal file in `workspace/.local/` and put into the CSV a
+moment later, so saving stays fast on big files and nothing is lost if the window is closed or
+the computer crashes – the next start picks the journal up. Projects opened from other folders
+are remembered in `settings.json`.
+
+`workspace/`, `settings.json`, CSV files, game files and API keys are kept out of this app's git
+repository by `.gitignore`.
 
 ## Advanced: saved project files
 
@@ -202,7 +262,8 @@ In the game, pick *Français*.
 |---|---|
 | `translator.py` | The editor (local web server, standard library only) |
 | `START_EDITOR.bat` / `START_SHARED.bat` | Start it (on its own / with teammates on your network) |
-| `formats.py` | Reading CSV/TSV/JSON, guessing columns, exporting |
+| `formats.py` | Reading CSV/TSV/JSON (keeping the file's exact formatting), guessing columns, exporting |
+| `gitsync.py` | Sync with a team through git, and the line-by-line merge git uses |
 | `web/` | The editor's page, styles and script |
 | `projects/` | Saved project files and their glossaries |
 | `adapters/` | Game-specific export/import scripts (Chained Echoes) |
