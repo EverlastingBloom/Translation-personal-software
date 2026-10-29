@@ -117,6 +117,16 @@ a.button {
   background: var(--panel); cursor: pointer; text-align: center; transition: .15s;
 }
 .dropzone:hover, .dropzone:focus-visible { border-color: var(--accent); }
+.dropzone.compact { padding: 18px 16px; margin: 10px 0; }
+.start-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.start-actions:has(#open-btn[hidden]) { grid-template-columns: 1fr; }
+.open-card {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 2px solid var(--accent); border-radius: 16px; padding: 40px 16px; text-align: center;
+}
+.open-card[hidden] { display: none; }
+.project-foot { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.online { display: inline-flex; align-items: center; gap: 2px; color: var(--done); }
 .drop-icon { font-size: 32px; color: var(--accent); line-height: 1; }
 .list-title { font-size: 15px; margin: 32px 0 10px; color: var(--muted); font-weight: 600; }
 .project-list { display: grid; gap: 10px; }
@@ -186,10 +196,13 @@ h2 { font-size: 18px; margin: 0; overflow-wrap: anywhere; }
   background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
   padding: 12px 14px; box-shadow: var(--shadow);
   border-left: 4px solid var(--todo);
+  /* the browser skips drawing cards that are far off screen: long scenes stay fast */
+  content-visibility: auto; contain-intrinsic-size: auto 200px;
 }
 .card.state-done { border-left-color: var(--done); }
 .card.state-review { border-left-color: var(--review); }
 .card.state-dirty { border-left-color: var(--accent); }
+.card.state-conflict { border-left-color: var(--warn); }
 .card.focused { border-color: var(--accent); }
 .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
 .rownum { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -209,7 +222,7 @@ h2 { font-size: 18px; margin: 0; overflow-wrap: anywhere; }
 .reference { font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 6px; }
 .reference b { font-weight: 600; }
 textarea.target {
-  width: 100%; min-height: 44px; resize: vertical;
+  width: 100%; min-height: 44px; resize: vertical; field-sizing: content;
   border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
   background: var(--panel-2); line-height: 1.45;
 }
@@ -274,7 +287,73 @@ kbd {
 .toast.show { opacity: 1; transform: translateX(-50%); }
 .toast.error { background: var(--warn); color: #fff; }
 
+/* saving */
+.save-group { display: inline-flex; }
+.save-group #save-btn { border-radius: 8px 0 0 8px; }
+.save-group .menu { border-radius: 0 8px 8px 0; padding: 6px 8px; border-left: 1px solid color-mix(in srgb, var(--accent-text) 35%, transparent); }
+.save-state {
+  border: 0; background: transparent; padding: 0; font-size: 12px; color: var(--muted);
+  flex-basis: 100%; text-align: right; margin-top: -8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.save-state.ok { color: var(--done); }
+.save-state.warn { color: var(--warn); }
+.save-options { display: flex; flex-direction: column; }
+.save-options code, .save-choice code { overflow-wrap: anywhere; }
+.save-path-row { display: flex; gap: 8px; margin: 4px 0 8px; }
+.save-path-row input, .share-row input, .note-edit input {
+  flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: var(--panel-2);
+}
+.save-choice { border: 1px solid var(--border); border-radius: 10px; padding: 6px 12px 10px; margin: 4px 0 0; }
+.save-choice legend { font-size: 13px; color: var(--muted); padding: 0 4px; }
+.save-choice .radio { color: var(--text); font-size: 14px; flex-direction: row; margin: 4px 0; }
+.setup-grid .save-choice label { display: flex; }
+.setup-grid fieldset[hidden], .setup-grid p[hidden] { display: none; }
+dialog h4 { margin: 14px 0 2px; font-size: 14px; }
+a.link { color: var(--accent); align-self: center; }
+
+/* teammates */
+.avatar {
+  display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+  color: #fff; font-size: 11px; font-weight: 700; flex-shrink: 0; line-height: 1;
+}
+.avatar.sm { width: 20px; height: 20px; font-size: 10px; }
+.avatar.xs { width: 16px; height: 16px; font-size: 8px; }
+.people { display: inline-flex; gap: 2px; vertical-align: middle; }
+.people:empty { display: none; }
+.share-btn { display: inline-flex; align-items: center; gap: 6px; }
+.me { display: inline-flex; align-items: center; gap: 6px; max-width: 160px; }
+.me-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scene-people { float: right; display: inline-flex; gap: 2px; }
+.here-tag { font-size: 11px; border: 1px solid; border-radius: 99px; padding: 0 8px; }
+.by { font-size: 12px; color: var(--muted); }
+.note {
+  background: color-mix(in srgb, var(--review) 16%, transparent); border-radius: 8px;
+  padding: 4px 10px; margin-bottom: 6px; font-size: 13px; cursor: pointer; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.note[hidden], .note-edit[hidden], .conflict[hidden] { display: none; }
+.note-edit { display: flex; gap: 6px; margin-top: 6px; }
+.conflict {
+  border: 1px solid var(--warn); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px;
+}
+.their-text { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel-2); border-radius: 6px; padding: 4px 8px; margin: 4px 0; font-size: 14px; }
+.conflict-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.same { color: var(--done); border-color: var(--done); }
+.same[hidden] { display: none; }
+.card.flash { animation: flash 1.2s ease-out; }
+@keyframes flash { from { box-shadow: 0 0 0 3px color-mix(in srgb, var(--done) 60%, transparent); } }
+.more { text-align: center; color: var(--muted); padding: 16px; font-size: 13px; }
+.share-row { display: flex; gap: 8px; margin: 6px 0; }
+.people-list { list-style: none; padding: 0; margin: 4px 0; display: grid; gap: 6px; }
+.people-list li { display: flex; align-items: center; gap: 4px; }
+.offline {
+  background: var(--warn); color: #fff; text-align: center; padding: 6px 12px; font-size: 14px;
+}
+.offline[hidden] { display: none; }
+
 @media (max-width: 800px) {
+  .start-actions { grid-template-columns: 1fr; }
+  .save-state { text-align: left; margin-top: 0; }
   .layout { flex-direction: column; }
   .sidebar { width: auto; border-right: 0; border-bottom: 1px solid var(--border); max-height: 40vh; }
   .content { padding: 12px 16px 60px; }

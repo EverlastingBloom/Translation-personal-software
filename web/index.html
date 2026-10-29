@@ -7,6 +7,8 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div id="offline" class="offline" hidden>Can't reach the editor – is translator.py still running? Your typing stays on this page until it's back.</div>
+
 <!-- ======================= start screen ======================= -->
 <section id="start" class="start" hidden>
   <div class="start-inner">
@@ -18,12 +20,19 @@
       </div>
     </div>
 
-    <label id="dropzone" class="dropzone" tabindex="0">
-      <input id="file-input" type="file" accept=".csv,.tsv,.txt,.json" hidden>
-      <span class="drop-icon" aria-hidden="true">⇪</span>
-      <strong>Drop a file here</strong>
-      <span class="muted">or click to choose one · CSV, TSV or JSON</span>
-    </label>
+    <div class="start-actions">
+      <button id="open-btn" class="open-card" type="button" hidden>
+        <span class="drop-icon" aria-hidden="true">📂</span>
+        <strong>Open a file…</strong>
+        <span class="muted">Recommended: Save then writes straight back next to it (or into it)</span>
+      </button>
+      <label id="dropzone" class="dropzone" tabindex="0">
+        <input id="file-input" type="file" accept=".csv,.tsv,.txt,.json" hidden>
+        <span class="drop-icon" aria-hidden="true">⇪</span>
+        <strong>Drop a file here</strong>
+        <span class="muted">or click to choose one · CSV, TSV or JSON</span>
+      </label>
+    </div>
 
     <h2 class="list-title">Your projects</h2>
     <div id="project-list" class="project-list"></div>
@@ -47,15 +56,23 @@
     <input id="search" type="search" placeholder="Search text, translation, speaker or key…" autocomplete="off">
     <select id="state-filter" title="Show lines">
       <option value="all">All lines</option>
+      <option value="todo">To do (not done)</option>
       <option value="untranslated">Untranslated</option>
       <option value="review">Needs review</option>
       <option value="done">Done</option>
+      <option value="notes">With notes</option>
     </select>
     <button id="glossary-btn" class="ghost">Glossary</button>
+    <button id="merge-btn" class="ghost" title="Bring in translations from a teammate's file">Merge</button>
+    <button id="share-btn" class="ghost share-btn">Team <span id="people" class="people"></span></button>
+    <button id="me-btn" class="ghost me" title="Your name – shown to teammates next to lines you translate"></button>
     <button id="help-btn" class="ghost" title="Keyboard shortcuts">?</button>
-    <button id="export-btn" class="ghost" title="Download the translated file">Export</button>
+    <span class="save-group">
+      <button id="save-btn" class="primary">Save</button><button id="save-menu-btn" class="primary menu" title="Where to save · download a copy" aria-label="Save options">▾</button>
+    </span>
     <button id="apply-btn" class="primary" hidden>Apply</button>
   </div>
+  <button id="save-state" class="save-state" type="button" title="Where the translation is saved"></button>
 </header>
 
 <div class="layout">
@@ -107,6 +124,19 @@
     <label id="tag-custom-wrap" class="span2" hidden>Custom pattern (regular expression)
       <input id="tag-custom" placeholder="\{[^}]*\}">
     </label>
+    <fieldset id="setup-save" class="span2 save-choice">
+      <legend>Where should the translation be saved?</legend>
+      <label class="radio"><input type="radio" name="save-to" value="next" checked>
+        <span>Next to the original, as <code id="save-next-name"></code> <span class="muted">(recommended)</span></span></label>
+      <label class="radio"><input type="radio" name="save-to" value="original">
+        <span>Into the original file <code id="save-original-name" class="small"></code>
+          <span id="save-original-warn" class="warn small">– its texts get replaced by your translation</span></span></label>
+      <label class="radio"><input type="radio" name="save-to" value="later"> <span>Decide later</span></label>
+      <span class="hint">The file is kept up to date automatically while you translate – no exporting.</span>
+    </fieldset>
+    <p id="setup-save-dropped" class="hint span2">Dropped files don't tell the editor where they came from, so the
+      first time you press <b>Save</b> you pick where the translation goes. After that Save updates that same file.
+      (Use <b>Open a file…</b> on the start screen to skip this.)</p>
   </div>
   <p class="hint">Without a scene column, lines are grouped in pages of 50. Preview of the first lines:</p>
   <div class="preview-wrap"><table id="preview" class="preview"></table></div>
@@ -121,7 +151,8 @@
     <h3>Glossary</h3>
     <button class="ghost" value="close">Close</button>
   </form>
-  <p class="hint">Terms found in a line show up under it. Click one to insert its translation.</p>
+  <p class="hint">Terms found in a line show up under it. Click one to insert its translation.
+    Everyone working on this project shares the same glossary.</p>
   <table class="glossary-table">
     <thead><tr><th>Original</th><th>Translation</th><th>Note</th><th></th></tr></thead>
     <tbody id="glossary-body"></tbody>
@@ -132,19 +163,72 @@
   </div>
 </dialog>
 
-<dialog id="export-dialog">
+<dialog id="save-dialog">
   <form method="dialog" class="dialog-head">
-    <h3>Export</h3>
+    <h3>Save</h3>
     <button class="ghost" value="close">Close</button>
   </form>
-  <p class="hint" id="export-info"></p>
-  <label class="radio"><input type="radio" name="fallback" value="source" checked>
-    Untranslated lines keep the original text <span class="muted">(a complete, usable file)</span></label>
+  <p id="save-current"></p>
+  <div id="save-choose">
+    <div id="save-options" class="save-options"></div>
+    <div class="save-path-row">
+      <input id="save-path" autocomplete="off" spellcheck="false">
+      <button id="save-browse" class="ghost" type="button">Browse…</button>
+    </div>
+    <label class="radio"><input id="save-auto" type="checkbox" checked>
+      <span>Keep this file up to date automatically <span class="muted">(otherwise only when you press Save)</span></span></label>
+  </div>
+  <p id="save-not-owner" class="hint" hidden>Only the person running the editor can choose where the file is saved.
+    Your lines are saved for everyone as you type.</p>
+  <h4>Untranslated lines</h4>
+  <label class="radio"><input type="radio" name="fallback" value="source">
+    <span>Keep the original text <span class="muted">(a complete file the game can use)</span></span></label>
   <label class="radio"><input type="radio" name="fallback" value="empty">
-    Untranslated lines stay empty <span class="muted">(easy to spot what's missing)</span></label>
+    <span>Stay empty <span class="muted">(easy to see what's missing)</span></span></label>
   <div class="dialog-actions">
-    <span></span>
-    <a id="export-link" class="button primary" href="#" download>Download</a>
+    <a id="export-link" class="link" href="#" download>Download a copy</a>
+    <button id="save-apply" class="primary" type="button">Save here</button>
+  </div>
+</dialog>
+
+<dialog id="merge-dialog">
+  <form method="dialog" class="dialog-head">
+    <h3>Merge translations</h3>
+    <button class="ghost" value="close">Close</button>
+  </form>
+  <p class="hint">Bring in a teammate's work: their saved/exported file of this project, or any file with the same
+    keys or the same original texts. Lines are matched by key, or else by identical original text.</p>
+  <label id="merge-drop" class="dropzone compact" tabindex="0">
+    <input id="merge-file" type="file" accept=".csv,.tsv,.txt,.json" hidden>
+    <strong>Choose or drop their file</strong>
+    <span class="muted">CSV, TSV or JSON</span>
+  </label>
+  <label class="radio"><input id="merge-review" type="checkbox" checked>
+    <span>Mark merged lines as <b>needs review</b> <span class="muted">(so someone checks them)</span></span></label>
+  <label class="radio"><input id="merge-overwrite" type="checkbox">
+    <span>Replace lines that already have a different translation here</span></label>
+  <p id="merge-result" class="hint"></p>
+</dialog>
+
+<dialog id="share-dialog">
+  <form method="dialog" class="dialog-head">
+    <h3>Work together</h3>
+    <button class="ghost" value="close">Close</button>
+  </form>
+  <div id="share-body"></div>
+  <h4>Here now</h4>
+  <ul id="share-people" class="people-list"></ul>
+</dialog>
+
+<dialog id="name-dialog">
+  <form method="dialog" class="dialog-head">
+    <h3>What's your name?</h3>
+    <button class="ghost" value="close">Skip</button>
+  </form>
+  <p class="hint">Shown to teammates next to the lines you translate and the notes you leave.</p>
+  <div class="save-path-row">
+    <input id="name-input" maxlength="40" autocomplete="name" placeholder="e.g. Evan">
+    <button id="name-save" class="primary" type="button">OK</button>
   </div>
 </dialog>
 
@@ -155,13 +239,15 @@
   </form>
   <table class="keys">
     <tr><td><kbd>Ctrl</kbd> + <kbd>Enter</kbd></td><td>Save, mark done, go to next line</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd></td><td>Save, mark “needs review”, go to next line</td></tr>
     <tr><td><kbd>Alt</kbd> + <kbd>↓</kbd> / <kbd>↑</kbd></td><td>Next / previous line</td></tr>
-    <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>Save this line</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>Save everything to the file</td></tr>
     <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd></td><td>Copy the original text into the box</td></tr>
     <tr><td><kbd>Esc</kbd></td><td>Undo unsaved changes in this line</td></tr>
   </table>
-  <p class="hint">Lines save automatically when you leave the box. Codes like <code>[panel=1]</code> or <code>{0}</code>
-    must all stay in the translation (their order may change); a warning appears if one is missing.</p>
+  <p class="hint">Lines save by themselves a moment after you stop typing, and when you leave the box. A line
+    you fix that was marked “needs review” stays that way until you press Done. Codes like <code>[panel=1]</code>
+    or <code>{0}</code> must all stay in the translation (their order may change); a warning appears if one is missing.</p>
 </dialog>
 
 <dialog id="apply-dialog">

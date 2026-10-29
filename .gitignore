@@ -1,6 +1,7 @@
 # Translation data and game files stay on your own computer, not in the repo
 *.csv
-*.csv.tmp
+*.tmp
+*.journal
 *.bundle
 *.assets
 catalog.json

@@ -6,6 +6,9 @@ const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
 };
+const CHUNK = 40;          // cards rendered at a time; more appear as you scroll
+const AUTOSAVE_MS = 1500;  // save a line this long after you stop typing
+const FIELD_SIZING = !!window.CSS?.supports?.("field-sizing", "content"); // textareas grow by themselves
 
 let projectId = null;    // id of the open project ("projects/x.json" or "workspace/y/project.json")
 let summary = null;      // project overview from the server
@@ -14,19 +17,42 @@ let tagRe = null;        // RegExp for codes that must survive translation
 let currentGroup = null;
 let currentScene = null; // subgroup id
 let scenes = [];
-let cards = [];          // rendered line cards, in order
+let sceneButtons = new Map(); // scene id -> its button in the sidebar
+let view = { lines: [], showWhere: false }; // every line in the main column; cards exist for the first ones
+let cards = [];          // rendered line cards, same order as view.lines
+const cardByRow = new Map();
 let draft = null;        // file being set up as a new project
+let me = store.get("userName") || "";
+const session = Math.random().toString(36).slice(2, 10);
+let version = 0;         // last change the server told us about
+let people = [];         // others working on this project right now
+let pollTimer = null;
+let polling = false;
+let focusedRow = null;
 
 // ---------- server ----------
-async function api(path, body, raw = false) {
-  const url = path + (projectId ? (path.includes("?") ? "&" : "?") + "p=" + encodeURIComponent(projectId) : "");
-  const opts = body === undefined ? {} : raw
-    ? { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body }
-    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-  const res = await fetch(url, opts);
+async function api(path, body, { raw = false, noProject = false } = {}) {
+  const pid = noProject ? null : projectId;
+  const url = path + (pid ? (path.includes("?") ? "&" : "?") + "p=" + encodeURIComponent(pid) : "");
+  const headers = { "X-User": encodeURIComponent(me) };
+  const opts = body === undefined ? { headers } : raw
+    ? { method: "POST", headers: { ...headers, "Content-Type": "application/octet-stream" }, body }
+    : { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  let res;
+  try {
+    res = await fetch(url, opts);
+  } catch {
+    setOffline(true);
+    throw Object.assign(new Error("Can't reach the editor. Is translator.py still running?"), { offline: true });
+  }
+  setOffline(false);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `Server error ${res.status}`), { status: res.status, data });
   return data;
+}
+
+function setOffline(off) {
+  $("#offline").hidden = !off;
 }
 
 function toast(msg, isError = false) {
@@ -34,7 +60,7 @@ function toast(msg, isError = false) {
   t.textContent = msg;
   t.className = "toast show" + (isError ? " error" : "");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (t.className = "toast"), isError ? 6000 : 1800);
+  toast.timer = setTimeout(() => (t.className = "toast"), isError ? 6000 : 2200);
 }
 
 function el(tag, cls, text) {
@@ -42,6 +68,14 @@ function el(tag, cls, text) {
   if (cls) e.className = cls;
   if (text !== undefined) e.textContent = text;
   return e;
+}
+
+function button(cls, text, onClick, title) {
+  const b = el("button", cls, text);
+  b.type = "button";
+  if (title) b.title = title;
+  if (onClick) b.addEventListener("click", onClick);
+  return b;
 }
 
 // ---------- helpers ----------
@@ -112,8 +146,17 @@ function insertAtCursor(ta, text) {
 }
 
 function autoGrow(ta) {
+  if (FIELD_SIZING) return;
   ta.style.height = "auto";
   ta.style.height = Math.max(44, ta.scrollHeight + 2) + "px";
+}
+
+/** Size many textareas with one layout pass instead of one per card. */
+function growAll(list) {
+  if (FIELD_SIZING || !list.length) return;
+  list.forEach((c) => (c.ta.style.height = "auto"));
+  const heights = list.map((c) => c.ta.scrollHeight);
+  list.forEach((c, i) => (c.ta.style.height = Math.max(44, heights[i] + 2) + "px"));
 }
 
 function setBar(container, done, review, total) {
@@ -137,9 +180,52 @@ function timeAgo(seconds) {
   return Math.round(d / 86400) + " days ago";
 }
 
+function initials(name) {
+  return (name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => [...w][0].toUpperCase()).join("") || "?";
+}
+
+/** A stable colour per person, so teammates are easy to tell apart. */
+function personColor(name) {
+  let h = 0;
+  for (const ch of name || "") h = (h * 31 + ch.codePointAt(0)) % 360;
+  return `hsl(${h} 55% 45%)`;
+}
+
+function avatar(name, cls = "avatar") {
+  const a = el("span", cls, initials(name));
+  a.style.background = personColor(name);
+  a.title = name;
+  return a;
+}
+
+// ---------- your name ----------
+function askName() {
+  const d = $("#name-dialog");
+  $("#name-input").value = me;
+  d.showModal();
+  $("#name-input").focus();
+  return new Promise((resolve) => d.addEventListener("close", resolve, { once: true }));
+}
+
+function saveName() {
+  const name = $("#name-input").value.trim().slice(0, 40);
+  if (!name) { $("#name-input").focus(); return; }
+  me = name;
+  store.set("userName", name);
+  showMe();
+  $("#name-dialog").close();
+}
+
+function showMe() {
+  const b = $("#me-btn");
+  b.textContent = "";
+  if (me) b.append(avatar(me), el("span", "me-name", me)); else b.textContent = "Set your name";
+}
+
 // ---------- start screen ----------
 async function showStart() {
   if (!(await flushAll())) return;
+  stopPolling();
   projectId = null;
   history.replaceState(null, "", location.pathname);
   $("#editor").hidden = true;
@@ -148,17 +234,20 @@ async function showStart() {
   const list = $("#project-list");
   list.textContent = "";
   list.append(el("p", "muted", "Loading…"));
-  let projects;
+  let res;
   try {
-    projects = await api("/api/projects");
+    res = await api("/api/projects", undefined, { noProject: true });
   } catch (err) {
     list.textContent = "";
-    list.append(el("p", "warn", "Can't reach the editor. Is translator.py still running?"));
+    list.append(el("p", "warn", err.message));
     return;
   }
+  $("#open-btn").hidden = !res.owner;
+  $("#open-btn").dataset.pick = res.can_pick ? "1" : "";
+  const projects = res.projects;
   list.textContent = "";
   if (!projects.length) {
-    list.append(el("p", "muted", "No projects yet. Drop a file above to start one."));
+    list.append(el("p", "muted", "No projects yet. Open or drop a file above to start one."));
     return;
   }
   for (const p of projects) {
@@ -175,8 +264,15 @@ async function showStart() {
       const meta = el("span", "project-meta");
       meta.append(miniBar(p.done, p.review, p.total),
         el("span", "", `${pct}% · ${p.done.toLocaleString()}/${p.total.toLocaleString()}`));
-      card.append(meta, el("span", "muted small",
-        (p.review ? `${p.review.toLocaleString()} to review · ` : "") + "edited " + timeAgo(p.modified)));
+      const foot = el("span", "project-foot muted small");
+      foot.append((p.review ? `${p.review.toLocaleString()} to review · ` : "") + "edited " + timeAgo(p.modified));
+      if (p.online?.length) {
+        const here = el("span", "online");
+        p.online.forEach((n) => here.append(avatar(n, "avatar sm")));
+        here.append(` ${p.online.join(", ")} working now`);
+        foot.append(here);
+      }
+      card.append(meta, foot);
       card.addEventListener("click", () => openProject(p.id));
     }
     list.append(card);
@@ -188,15 +284,33 @@ async function handleFile(file) {
   if (!file) return;
   if (!(await flushAll())) return;
   toast(`Reading ${file.name}…`);
-  const saved = projectId;
-  projectId = null;
   try {
-    draft = await api("/api/import?name=" + encodeURIComponent(file.name), file, true);
+    draft = await api("/api/import?name=" + encodeURIComponent(file.name), file, { raw: true, noProject: true });
   } catch (err) {
     toast(err.message, true);
     return;
-  } finally {
-    projectId = saved;
+  }
+  showSetup();
+}
+
+/** Open a file by its place on disk, so Save can write next to it (or into it) later. */
+async function openFromDisk() {
+  if (!(await flushAll())) return;
+  let body = {};
+  if ($("#open-btn").dataset.pick) {
+    toast("Pick the file in the window that opened (it may be behind the browser)…");
+  } else {
+    const path = prompt("Full path of the file to translate, e.g. C:\\Games\\MyGame\\dialogue.csv");
+    if (!path) return;
+    body = { path };
+  }
+  try {
+    const res = await api("/api/open", body, { noProject: true });
+    if (res.cancelled) return;
+    draft = res;
+  } catch (err) {
+    toast(err.message, true);
+    return;
   }
   showSetup();
 }
@@ -247,8 +361,26 @@ function showSetup() {
   preset.value = d.tag_guess;
   $("#tag-custom-wrap").hidden = true;
   $("#setup-error").textContent = "";
+  $("#setup-save").hidden = !d.origin;
+  $("#setup-save-dropped").hidden = !!d.origin;
+  if (d.origin) {
+    document.querySelector("input[name=save-to][value=next]").checked = true;
+    $("#save-original-name").textContent = d.origin;
+    $("#save-original-warn").hidden = d.format === "csv";
+    updateSetupSaveName();
+  }
   renderPreview();
   $("#setup-dialog").showModal();
+}
+
+/** "dialogue.csv" + "Indonesian" -> "dialogue.indonesian.csv", like the server names it. */
+function updateSetupSaveName() {
+  if (!draft?.origin) return;
+  const label = ($("#setup-label").value.trim() || "translated").replace(/[^\p{L}\p{N}_-]+/gu, "-")
+    .replace(/^-+|-+$/g, "").toLowerCase() || "translated";
+  const stem = draft.filename.replace(/\.[^.]+$/, "");
+  const ext = draft.format === "csv" ? (draft.filename.toLowerCase().endsWith(".tsv") ? ".tsv" : ".csv") : ".json";
+  $("#save-next-name").textContent = `${stem}.${label}${ext}`;
 }
 
 function renderPreview() {
@@ -283,6 +415,13 @@ async function createProject() {
   }
   const label = $("#setup-label").value.trim();
   store.set("lastLabel", label);
+  let target = tgtSel;
+  if (tgtSel === "__new__") {
+    // a new column named after the language, unless the file already has one with that name
+    const wanted = label ? label.toLowerCase() : "translation";
+    target = [wanted, "translation", "translation_new"].find((n) => !draft.fields.includes(n)) || wanted + "_new";
+  }
+  const saveTo = document.querySelector("input[name=save-to]:checked")?.value;
   const body = {
     draft: draft.draft,
     name: $("#setup-name").value,
@@ -290,48 +429,45 @@ async function createProject() {
     tag_pattern: pattern,
     columns: {
       source: $("#map-source").value,
-      target: tgtSel === "__new__" ? (label ? label.toLowerCase() : "translation") : tgtSel,
+      target,
       speaker: $("#map-speaker").value,
       key: $("#map-key").value,
       group: $("#map-group").value,
       subgroup: $("#map-subgroup").value,
       reference: $("#map-reference").value,
     },
+    save_to: draft.origin && saveTo !== "later" ? { choice: saveTo, auto: true } : null,
   };
-  if (body.columns.target !== "translation" && draft.fields.includes(body.columns.target) && tgtSel === "__new__") {
-    body.columns.target = "translation";
-  }
+  const btn = $("#setup-create");
+  btn.disabled = true;
   try {
-    const saved = projectId;
-    projectId = null;
-    const res = await api("/api/create", body).finally(() => (projectId = saved));
+    const res = await api("/api/create", body, { noProject: true });
     draft = null;
     $("#setup-dialog").close();
     await openProject(res.id);
   } catch (err) {
     $("#setup-error").textContent = err.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 
 async function cancelSetup() {
   $("#setup-dialog").close();
   if (!draft) return;
-  const saved = projectId;
-  projectId = null;
-  await api("/api/discard", { draft: draft.draft }).catch(() => {});
-  projectId = saved;
+  await api("/api/discard", { draft: draft.draft }, { noProject: true }).catch(() => {});
   draft = null;
 }
 
 // ---------- overview ----------
 async function openProject(id) {
   if (projectId && !(await flushAll())) return;
+  stopPolling();
   projectId = id;
   history.replaceState(null, "", "#p=" + encodeURIComponent(id));
   store.set("lastProject", id);
   currentGroup = currentScene = null;
-  cards = [];
-  $("#lines").textContent = "";
+  clearLines();
   $("#search").value = "";
   try {
     [glossary] = await Promise.all([api("/api/glossary"), loadSummary()]);
@@ -341,8 +477,10 @@ async function openProject(id) {
     showStart();
     return;
   }
+  version = summary.version;
   $("#start").hidden = true;
   $("#editor").hidden = false;
+  if (!me) await askName();
   const sel = $("#group-select");
   const savedGroup = store.get(id + "|group");
   if (savedGroup && summary.groups.some((g) => g.name === savedGroup)) sel.value = savedGroup;
@@ -350,6 +488,7 @@ async function openProject(id) {
   const savedScene = store.get(id + "|scene");
   const scene = scenes.find((s) => s.id === savedScene) || scenes.find((s) => s.done < s.total) || scenes[0];
   if (scene) await openScene(scene.id);
+  startPolling();
 }
 
 async function loadSummary() {
@@ -380,6 +519,7 @@ async function loadSummary() {
   if (keep) sel.value = keep;
   $("#apply-btn").hidden = !summary.apply_label;
   if (summary.apply_label) $("#apply-btn").textContent = summary.apply_label;
+  renderSaveState(summary.save);
   showGroupStats();
 }
 
@@ -398,77 +538,152 @@ async function loadScenes(group) {
   showGroupStats();
 }
 
+function sceneMeta(s) {
+  const meta = el("span", "scene-meta");
+  meta.append(miniBar(s.done, s.review, s.total), el("span", "", `${s.done}/${s.total}`));
+  return meta;
+}
+
 function renderScenes() {
   const list = $("#scene-list");
   const filter = $("#scene-filter").value.trim().toLowerCase();
   list.textContent = "";
+  sceneButtons = new Map();
+  const frag = document.createDocumentFragment();
   for (const s of scenes) {
     if (filter && !s.title.toLowerCase().includes(filter)) continue;
     const b = el("button", "scene" + (s.id === currentScene ? " active" : ""));
+    b.type = "button";
     b.dataset.id = s.id;
-    const meta = el("span", "scene-meta");
-    meta.append(miniBar(s.done, s.review, s.total), el("span", "", `${s.done}/${s.total}`));
-    b.append(el("span", "scene-title", s.title || "(untitled)"), meta);
+    const here = el("span", "scene-people");
+    b.append(el("span", "scene-title", s.title || "(untitled)"), here, sceneMeta(s));
     b.addEventListener("click", () => openScene(s.id));
-    list.append(b);
+    sceneButtons.set(s.id, b);
+    frag.append(b);
+  }
+  list.append(frag);
+  markScenePeople();
+}
+
+/** Update progress in the sidebar without rebuilding it (keeps scroll position and focus). */
+function updateSceneMeta() {
+  for (const s of scenes) {
+    const b = sceneButtons.get(s.id);
+    if (b) b.lastElementChild.replaceWith(sceneMeta(s));
+  }
+}
+
+function markScenePeople() {
+  for (const [id, b] of sceneButtons) {
+    const here = b.querySelector(".scene-people");
+    here.textContent = "";
+    people.filter((p) => p.scene === id).forEach((p) => here.append(avatar(p.name, "avatar xs")));
   }
 }
 
 // ---------- lines ----------
-async function openScene(id) {
+async function openScene(id, { keepScroll = false } = {}) {
   if (!(await flushAll())) return;
   currentScene = id;
   store.set(projectId + "|scene", id);
   $("#search").value = "";
-  document.querySelectorAll(".scene").forEach((b) => b.classList.toggle("active", b.dataset.id === id));
+  sceneButtons.forEach((b, sid) => b.classList.toggle("active", sid === id));
   const s = scenes.find((x) => x.id === id);
   $("#crumb").textContent = currentGroup;
   $("#scene-title").textContent = s ? s.title || "(untitled)" : "";
   const state = $("#state-filter").value;
-  const lines = await api(`/api/lines?group=${encodeURIComponent(currentGroup)}&subgroup=${encodeURIComponent(id)}&state=${state}&limit=5000`);
-  renderLines(lines, false);
+  try {
+    const lines = await api(`/api/lines?group=${encodeURIComponent(currentGroup)}&subgroup=${encodeURIComponent(id)}&state=${state}&limit=20000`);
+    renderLines(lines, false, keepScroll);
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
-async function runSearch() {
+async function runSearch({ keepScroll = false } = {}) {
   const q = $("#search").value.trim();
-  if (!q) { if (currentScene) openScene(currentScene); return; }
+  if (!q) { if (currentScene !== null) openScene(currentScene); return; }
   if (!(await flushAll())) return;
   const state = $("#state-filter").value;
-  const lines = await api(`/api/lines?search=${encodeURIComponent(q)}&state=${state}&limit=300`);
-  $("#crumb").textContent = "Search";
-  $("#scene-title").textContent = `“${q}” – ${lines.length}${lines.length === 300 ? "+" : ""} lines`;
-  renderLines(lines, true);
+  try {
+    const lines = await api(`/api/lines?search=${encodeURIComponent(q)}&state=${state}&limit=300`);
+    $("#crumb").textContent = "Search";
+    $("#scene-title").textContent = `“${q}” – ${lines.length}${lines.length === 300 ? "+" : ""} lines`;
+    renderLines(lines, true, keepScroll);
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
-function renderLines(lines, showWhere) {
-  const box = $("#lines");
-  box.textContent = "";
+/** Show the current scene/search again with fresh data (after a merge, or the file changed on disk). */
+async function reloadView() {
+  if (cards.some((c) => c.ta.value !== c.saved)) { updateCounts(); return; }
+  if ($("#search").value.trim()) await runSearch({ keepScroll: true });
+  else if (currentScene !== null) await openScene(currentScene, { keepScroll: true });
+  updateCounts();
+}
+
+function clearLines() {
+  $("#lines").textContent = "";
   cards = [];
+  cardByRow.clear();
+  view = { lines: [], showWhere: false };
+}
+
+const moreSentinel = el("div", "more", "Loading more lines…");
+const moreObserver = new IntersectionObserver((entries) => {
+  if (entries.some((e) => e.isIntersecting)) renderMore();
+}, { rootMargin: "800px" });
+moreObserver.observe(moreSentinel);
+
+function renderLines(lines, showWhere, keepScroll = false) {
+  const content = $(".content");
+  const top = content.scrollTop;
+  const keepCount = keepScroll ? cards.length : 0;
+  clearLines();
+  view = { lines, showWhere };
+  const box = $("#lines");
   if (!lines.length) {
     box.append(el("div", "empty", "No lines here with this filter."));
     return;
   }
-  for (const line of lines) {
-    const card = buildCard(line, showWhere);
+  renderMore(Math.max(CHUNK, keepCount));
+  content.scrollTop = keepScroll ? top : 0;
+}
+
+function renderMore(upto = cards.length + CHUNK) {
+  const box = $("#lines");
+  const end = Math.min(upto, view.lines.length);
+  if (cards.length >= end) return;
+  const frag = document.createDocumentFragment();
+  const fresh = [];
+  for (let i = cards.length; i < end; i++) {
+    const card = buildCard(view.lines[i], view.showWhere);
     cards.push(card);
-    box.append(card.el);
+    cardByRow.set(card.line.row, card);
+    frag.append(card.el);
+    fresh.push(card);
   }
-  requestAnimationFrame(() => cards.forEach((c) => autoGrow(c.ta)));
-  $(".content").scrollTop = 0;
+  box.append(frag);
+  growAll(fresh);
+  markCardPeople(fresh);
+  if (cards.length < view.lines.length) box.append(moreSentinel); else moreSentinel.remove();
 }
 
 function buildCard(line, showWhere) {
   const root = el("article");
-  const card = { line, el: root, saved: line.target, saving: false };
+  const card = { line, el: root, saved: line.target, pending: null, conflict: null, same: 0, error: null, timer: null };
 
   const head = el("div", "card-head");
   head.append(el("span", "rownum", "#" + (line.row + 1)));
   if (line.speaker) head.append(el("span", "speaker", line.speaker));
   if (line.key) head.append(el("code", "key", line.key));
   if (showWhere) head.append(el("span", "where", `${line.group} › ${line.subgroup}`));
+  const here = el("span", "here");
+  const by = el("span", "by");
   const dirty = el("span", "dirty");
   const chip = el("span");
-  head.append(dirty, chip);
+  head.append(here, by, dirty, chip);
 
   const src = el("div", "source");
   renderSource(src, line.source);
@@ -476,45 +691,69 @@ function buildCard(line, showWhere) {
   const ref = el("div", "reference");
   if (line.reference) ref.append(el("b", "", (summary.labels.reference || "Reference") + ": "), line.reference);
 
+  const note = el("div", "note");
+  note.addEventListener("click", () => editNote(card));
+  note.title = "Click to edit the note";
+
+  const conflictBox = el("div", "conflict");
+  conflictBox.hidden = true;
+
   const ta = el("textarea", "target");
   ta.rows = 1;
   ta.spellcheck = false;
   ta.placeholder = (summary.labels.target || "Translation") + "…";
   ta.value = line.target;
 
+  const noteEdit = el("div", "note-edit");
+  noteEdit.hidden = true;
+  const noteInput = el("input");
+  noteInput.placeholder = "Note for your team (e.g. “not sure about the tone here”) – empty to remove";
+  noteInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); saveNote(card); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); noteEdit.hidden = true; ta.focus(); }
+  });
+  noteEdit.append(noteInput, button("small primary", "Save note", () => saveNote(card)),
+    button("small ghost", "Cancel", () => { noteEdit.hidden = true; }));
+
   const foot = el("div", "card-foot");
   const tagInfo = el("span");
   const count = el("span", "count");
   const hints = el("span", "hints");
   for (const g of glossaryHits(line.source)) {
-    const h = el("button", "hint-chip", `${g.source} → ${g.target || "(keep)"}`);
-    h.type = "button";
-    h.title = (g.note ? g.note + " · " : "") + "Click to insert";
-    h.addEventListener("click", () => insertAtCursor(ta, g.target || g.source));
+    const h = button("hint-chip", `${g.source} → ${g.target || "(keep)"}`,
+      () => insertAtCursor(ta, g.target || g.source), (g.note ? g.note + " · " : "") + "Click to insert");
     hints.append(h);
   }
+  const sameBtn = button("small ghost same", "", () => fillSame(card),
+    "Use this translation for the other untranslated lines with exactly the same original text");
+  sameBtn.hidden = true;
   const actions = el("span", "foot-actions");
-  const copyBtn = el("button", "small ghost", "Copy original");
-  copyBtn.type = "button";
-  copyBtn.title = "Ctrl+Shift+C";
-  copyBtn.addEventListener("click", () => { ta.value = line.source; ta.dispatchEvent(new Event("input")); ta.focus(); });
-  const doneBtn = el("button", "small primary", "Done ✓");
-  doneBtn.type = "button";
-  doneBtn.title = "Save and mark done (Ctrl+Enter)";
-  doneBtn.addEventListener("click", () => save(card, "reviewed").then((ok) => ok && focusNext(card)));
-  actions.append(copyBtn, doneBtn);
-  foot.append(tagInfo, count, hints, actions);
+  actions.append(
+    button("small ghost", "Note", () => editNote(card), "Leave a note for your team on this line"),
+    button("small ghost", "Copy original", () => { ta.value = line.source; ta.dispatchEvent(new Event("input")); ta.focus(); }, "Ctrl+Shift+C"),
+    button("small ghost flag", "⚑ Review", () => save(card, "review").then((ok) => ok && focusNext(card)),
+      "Save and mark “needs review” – someone should check this line (Ctrl+Shift+Enter)"),
+    button("small primary", "Done ✓", () => save(card, "done").then((ok) => ok && focusNext(card)),
+      "Save and mark done (Ctrl+Enter)"),
+  );
+  foot.append(tagInfo, count, hints, sameBtn, actions);
 
-  root.append(head, src, ref, ta, foot);
-  Object.assign(card, { ta, chip, dirty, tagInfo, count });
+  root.append(head, src, ref, note, conflictBox, ta, noteEdit, foot);
+  Object.assign(card, { ta, chip, dirty, tagInfo, count, by, here, note, conflictBox, noteEdit, noteInput, sameBtn });
   refresh(card);
 
-  ta.addEventListener("input", () => { autoGrow(ta); refresh(card); });
+  ta.addEventListener("input", () => {
+    autoGrow(ta);
+    refresh(card);
+    clearTimeout(card.timer);
+    card.timer = setTimeout(() => save(card, "auto", { quiet: true }), AUTOSAVE_MS);
+  });
   ta.addEventListener("focus", () => {
     cards.forEach((c) => c.el.classList.remove("focused"));
     root.classList.add("focused");
+    focusedRow = card.line.row;
   });
-  ta.addEventListener("blur", () => { if (ta.value !== card.saved) save(card, "reviewed"); });
+  ta.addEventListener("blur", () => { if (ta.value !== card.saved) save(card, "auto"); });
   ta.addEventListener("keydown", (e) => onKey(e, card));
   return card;
 }
@@ -522,12 +761,18 @@ function buildCard(line, showWhere) {
 function refresh(card) {
   const { line, ta } = card;
   const text = ta.value;
-  const state = text !== card.saved ? "dirty" : line.state;
+  const isDirty = text !== card.saved;
+  const state = card.conflict ? "conflict" : isDirty ? "dirty" : line.state;
   card.el.className = "card state-" + state + (card.el.classList.contains("focused") ? " focused" : "");
   card.chip.className = "chip " + line.state;
   card.chip.textContent = STATE_LABEL[line.state] +
     (line.status === "google" || line.status === "machine" ? " (machine)" : "");
-  card.dirty.textContent = text !== card.saved ? "● unsaved" : "";
+  card.dirty.textContent = card.pending ? "saving…" : isDirty ? "● unsaved" : "";
+  card.by.textContent = line.by ? `✎ ${line.by}${line.at ? " · " + timeAgo(line.at) : ""}` : "";
+  card.note.hidden = !line.note;
+  if (line.note) card.note.textContent = `📝 ${line.note}${line.note_by ? " — " + line.note_by : ""}`;
+  card.sameBtn.hidden = !card.same;
+  card.sameBtn.textContent = `Fill ${card.same} identical line${card.same === 1 ? "" : "s"}`;
   const need = tagsOf(line.source);
   if (!text.trim()) {
     card.tagInfo.textContent = need.length ? `Keep: ${need.join(" ")}` : "";
@@ -546,36 +791,106 @@ function refresh(card) {
   card.count.textContent = `${text.length}/${line.source.length} chars`;
 }
 
-async function save(card, status) {
+/**
+ * Save one line. mode: "auto" (typing pause, leaving the box – keeps a "needs review" flag),
+ * "done" or "review". Waits for a save that is still on its way instead of giving up, so
+ * clicking Done / another scene / Save right after typing always works.
+ */
+async function save(card, mode = "auto", { quiet = false, force = false } = {}) {
+  clearTimeout(card.timer);
+  while (card.pending) await card.pending;
   const text = card.ta.value;
-  if (text.trim() && !sameTags(card.line.source, text)) {
-    toast("The codes don't match the original – fix them first.", true);
+  card.error = null;
+  if (card.conflict && !force) {
+    card.error = "conflict";
+    if (!quiet) toast("Someone else changed this line – pick which version to keep first.", true);
     return false;
   }
-  if (!text.trim() && hasWords(card.line.source)) status = "";
-  if (card.saving) return false;
-  card.saving = true;
-  try {
-    card.line = await api("/api/line", { row: card.line.row, target: text, status });
-    card.saved = text;
-    refresh(card);
-    updateCounts();
-    return true;
-  } catch (err) {
-    toast(err.message, true);
+  if (text.trim() && !sameTags(card.line.source, text)) {
+    card.error = "codes";
+    if (!quiet) toast("The codes don't match the original – fix them first.", true);
     return false;
+  }
+  let status = mode === "done" ? "reviewed" : mode === "review" ? "review"
+    : card.line.state === "review" ? card.line.status : "reviewed";
+  if (!text.trim() && hasWords(card.line.source)) status = "";
+  if (!force && text === card.saved && status === card.line.status) return true;
+  card.pending = (async () => {
+    try {
+      const res = await api("/api/line", { row: card.line.row, target: text, status, base: card.saved, force });
+      card.line = res.line;
+      card.saved = text;
+      card.same = res.same || 0;
+      return true;
+    } catch (err) {
+      if (err.status === 409 && err.data?.conflict) {
+        showConflict(card, err.data.line, mode);
+        card.error = "conflict";
+      } else {
+        card.error = err.message;
+        if (!quiet || !err.offline) toast(err.message, true);
+      }
+      return false;
+    }
+  })();
+  refresh(card);
+  let ok;
+  try {
+    ok = await card.pending;
   } finally {
-    card.saving = false;
+    card.pending = null;
+  }
+  refresh(card);
+  if (ok) updateCounts();
+  return ok;
+}
+
+function showConflict(card, theirs, mode = "auto") {
+  card.conflict = theirs;
+  const box = card.conflictBox;
+  box.textContent = "";
+  box.hidden = false;
+  box.append(el("div", "", `${theirs.by || "Someone"} changed this line while you were editing it. Their version:`),
+    el("div", "their-text", theirs.target || "(empty)"));
+  const btns = el("div", "conflict-actions");
+  btns.append(
+    button("small ghost", "Use theirs", () => resolveConflict(card, false)),
+    button("small primary", "Keep mine", () => resolveConflict(card, true, mode)),
+  );
+  box.append(btns);
+  refresh(card);
+}
+
+function resolveConflict(card, keepMine, mode = "auto") {
+  const theirs = card.conflict;
+  card.conflict = null;
+  card.conflictBox.hidden = true;
+  if (keepMine) {
+    card.line = { ...theirs, target: card.line.target };
+    save(card, mode, { force: true });
+  } else {
+    card.line = theirs;
+    card.saved = card.ta.value = theirs.target;
+    autoGrow(card.ta);
+    refresh(card);
   }
 }
 
-/** Save every card with unsaved changes. Returns false if one could not be saved. */
+/** Save every card with unsaved changes. Returns false if the user chose to stay and fix one. */
 async function flushAll() {
   for (const c of cards) {
-    if (c.ta.value !== c.saved && !(await save(c, "reviewed"))) {
+    while (c.pending) await c.pending;
+    if (c.ta.value === c.saved && !c.conflict) continue;
+    if (await save(c, "auto", { quiet: true })) continue;
+    c.el.scrollIntoView({ block: "center" });
+    const why = c.error === "conflict" ? "someone else changed it at the same time"
+      : c.error === "codes" ? "its codes don't match the original" : c.error;
+    if (!confirm(`Line #${c.line.row + 1} can't be saved: ${why}.\n\nOK = throw away your change to this line and continue\nCancel = stay here and fix it`)) {
       c.ta.focus();
       return false;
     }
+    if (c.conflict) resolveConflict(c, false);
+    else { c.ta.value = c.saved; autoGrow(c.ta); refresh(c); }
   }
   return true;
 }
@@ -585,57 +900,243 @@ function updateCounts() {
   clearTimeout(countsTimer);
   countsTimer = setTimeout(async () => {
     if (!projectId) return;
-    await loadSummary();
-    if (currentGroup) {
-      scenes = await api("/api/subgroups?group=" + encodeURIComponent(currentGroup));
-      renderScenes();
-    }
-  }, 600);
+    try {
+      await loadSummary();
+      if (currentGroup !== null) {
+        scenes = await api("/api/subgroups?group=" + encodeURIComponent(currentGroup));
+        if (scenes.every((s) => sceneButtons.has(s.id) || $("#scene-filter").value)) updateSceneMeta(); else renderScenes();
+      }
+    } catch { /* shown by the offline bar */ }
+  }, 500);
+}
+
+function focusIndex(i, smooth = false) {
+  if (i < 0 || i >= view.lines.length) return;
+  if (i >= cards.length) renderMore(i + CHUNK);
+  const c = cards[i];
+  c.ta.focus({ preventScroll: true });
+  c.el.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
 }
 
 function focusNext(card, step = 1) {
-  const i = cards.indexOf(card) + step;
-  if (i >= 0 && i < cards.length) {
-    cards[i].ta.focus();
-    cards[i].el.scrollIntoView({ block: "center", behavior: "smooth" });
-  }
+  focusIndex(cards.indexOf(card) + step, true);
 }
 
 function onKey(e, card) {
   if (e.key === "Enter" && e.ctrlKey) {
     e.preventDefault();
-    save(card, "reviewed").then((ok) => ok && focusNext(card));
+    save(card, e.shiftKey ? "review" : "done").then((ok) => ok && focusNext(card));
   } else if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
     e.preventDefault();
     focusNext(card, e.key === "ArrowDown" ? 1 : -1);
-  } else if (e.key === "s" && e.ctrlKey) {
-    e.preventDefault();
-    save(card, "reviewed");
-  } else if (e.key === "C" && e.ctrlKey && e.shiftKey) {
+  } else if ((e.key === "C" || e.key === "c") && e.ctrlKey && e.shiftKey) {
     e.preventDefault();
     card.ta.value = card.line.source;
     card.ta.dispatchEvent(new Event("input"));
   } else if (e.key === "Escape") {
     card.ta.value = card.saved;
     card.ta.dispatchEvent(new Event("input"));
+    clearTimeout(card.timer);
   }
 }
 
 async function nextUnfinished() {
-  const start = cards.findIndex((c) => c.el.classList.contains("focused")) + 1;
-  const isOpen = (c) => c.line.state !== "done" || !c.ta.value.trim();
-  const found = cards.slice(start).find(isOpen) || cards.slice(0, start).find(isOpen);
-  if (found) {
-    found.ta.focus();
-    found.el.scrollIntoView({ block: "center", behavior: "smooth" });
-    return;
+  const n = view.lines.length;
+  const cur = cards.findIndex((c) => c.el.classList.contains("focused"));
+  const isOpen = (i) => {
+    const c = cards[i];
+    return c ? c.line.state !== "done" || !c.ta.value.trim() : view.lines[i].state !== "done";
+  };
+  for (let k = 1; k <= n; k++) {
+    const i = (cur + k + n) % n;
+    if (i === cur) continue;
+    if (isOpen(i)) { focusIndex(i); return; }
   }
+  if ($("#search").value.trim()) { toast("No unfinished lines in these results."); return; }
   const idx = scenes.findIndex((s) => s.id === currentScene);
-  const next = scenes.slice(idx + 1).find((s) => s.done < s.total) || scenes.find((s) => s.done < s.total);
+  const next = scenes.slice(idx + 1).find((s) => s.done < s.total) || scenes.find((s) => s.done < s.total && s.id !== currentScene);
   if (!next) { toast("Everything in this section is done!"); return; }
   await openScene(next.id);
-  const first = cards.find(isOpen);
-  if (first) first.ta.focus();
+  const first = view.lines.findIndex((l) => l.state !== "done");
+  if (first >= 0) focusIndex(first);
+}
+
+// ---------- notes & identical lines ----------
+function editNote(card) {
+  card.noteEdit.hidden = false;
+  card.noteInput.value = card.line.note || "";
+  card.noteInput.focus();
+}
+
+async function saveNote(card) {
+  try {
+    const res = await api("/api/note", { row: card.line.row, note: card.noteInput.value });
+    card.line = { ...res.line, target: card.line.target, status: card.line.status, state: card.line.state };
+    card.noteEdit.hidden = true;
+    refresh(card);
+    card.ta.focus();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function fillSame(card) {
+  if (!(await save(card, "auto"))) return;
+  try {
+    const res = await api("/api/fill-same", { row: card.line.row });
+    card.same = 0;
+    refresh(card);
+    toast(`Filled ${res.filled} identical line${res.filled === 1 ? "" : "s"}`);
+    pollNow();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// ---------- live updates & teammates ----------
+function startPolling() {
+  stopPolling();
+  pollTimer = setTimeout(poll, 1000);
+}
+
+function stopPolling() {
+  clearTimeout(pollTimer);
+  pollTimer = null;
+  people = [];
+  renderPeople();
+}
+
+function pollNow() {
+  clearTimeout(pollTimer);
+  poll();
+}
+
+async function poll() {
+  const pid = projectId;
+  if (!pid || polling) return;
+  polling = true;
+  try {
+    if (!document.hidden) {
+      const res = await api(`/api/poll?since=${version}&session=${session}&row=${focusedRow ?? ""}` +
+        `&scene=${encodeURIComponent(currentScene ?? "")}`);
+      if (pid !== projectId) return;
+      version = res.version;
+      if (res.reload) {
+        await reloadView();
+      } else if (res.lines.length) {
+        res.lines.forEach(applyRemote);
+        updateCounts();
+      }
+      people = res.people;
+      renderPeople();
+      renderSaveState(res.save);
+    }
+  } catch { /* offline: the bar says so, keep trying */ } finally {
+    polling = false;
+    if (pid === projectId) {
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(poll, people.length ? 2000 : 4000);
+    }
+  }
+}
+
+/** A line changed on the server (a teammate, another tab, Fill identical, Merge). */
+function applyRemote(line) {
+  const i = view.lines.findIndex((l) => l.row === line.row);
+  if (i >= 0 && i >= cards.length) view.lines[i] = line;
+  const card = cardByRow.get(line.row);
+  if (!card || card.pending) return; // a save of ours is on its way; its answer wins
+  if ((line.at || 0) < (card.line.at || 0) && line.note === card.line.note) return; // older news
+  const dirty = card.ta.value !== card.saved;
+  if (!dirty) {
+    const changed = line.target !== card.saved;
+    card.line = line;
+    card.saved = line.target;
+    if (changed) {
+      card.ta.value = line.target;
+      autoGrow(card.ta);
+      if (line.by !== me) flash(card);
+    }
+  } else if (line.target !== card.saved) {
+    showConflict(card, line);
+    return;
+  } else {
+    card.line = line; // only the note or status changed
+  }
+  refresh(card);
+}
+
+function flash(card) {
+  card.el.classList.remove("flash");
+  void card.el.offsetWidth;
+  card.el.classList.add("flash");
+}
+
+function renderPeople() {
+  const box = $("#people");
+  box.textContent = "";
+  const names = [...new Set(people.map((p) => p.name))];
+  names.forEach((n) => box.append(avatar(n, "avatar sm")));
+  $("#share-btn").title = names.length ? `Working now: ${names.join(", ")}` : "Work on this project together";
+  markCardPeople(cards);
+  markScenePeople();
+}
+
+function markCardPeople(list) {
+  for (const c of list) {
+    c.here.textContent = "";
+    for (const p of people) {
+      if (p.row !== c.line.row) continue;
+      const tag = el("span", "here-tag", `${p.name} is here`);
+      tag.style.borderColor = tag.style.color = personColor(p.name);
+      c.here.append(tag);
+    }
+  }
+}
+
+async function openShare() {
+  const d = $("#share-dialog");
+  const box = $("#share-body");
+  box.textContent = "";
+  let info = { shared: false };
+  try { info = await api("/api/share", undefined, { noProject: true }); } catch { /* offline */ }
+  if (info.shared && info.urls.length) {
+    box.append(el("p", "", "Sharing is on. Send this link to teammates on the same Wi-Fi or network:"));
+    for (const u of info.urls) {
+      const row = el("div", "share-row");
+      const input = el("input");
+      input.value = u;
+      input.readOnly = true;
+      row.append(input, button("small primary", "Copy", async () => {
+        try { await navigator.clipboard.writeText(u); toast("Link copied"); } catch { input.select(); }
+      }));
+      box.append(row);
+    }
+    box.append(el("p", "hint", "Everyone edits the same project live: lines others change appear on your screen, " +
+      "you see who is on which line, and if two people change the same line at once the editor asks which version to keep."));
+  } else if (info.shared) {
+    box.append(el("p", "", "You joined through a share link – you're working together with the person running the editor."));
+  } else {
+    box.append(el("p", "", "Translate together, live:"));
+    const ol = el("ol");
+    ol.append(el("li", "", "Close the editor window."),
+      el("li", "", "Start START_SHARED.bat instead (or: python translator.py --share)."),
+      el("li", "", "It shows a link – send it to your teammates on the same Wi-Fi / network."));
+    box.append(ol,
+      el("p", "hint", "Not on the same network? Each person translates their own copy, then use Merge to bring " +
+        "everyone's lines together. Lines are matched by key or identical original text."));
+  }
+  const list = $("#share-people");
+  list.textContent = "";
+  const all = [{ name: me || "You", row: focusedRow, scene: currentScene, self: true }, ...people];
+  for (const p of all) {
+    const li = el("li");
+    const scene = scenes.find((s) => s.id === p.scene);
+    li.append(avatar(p.name, "avatar sm"), ` ${p.name}${p.self ? " (you)" : ""}`,
+      el("span", "muted", scene ? ` · ${scene.title}` : p.row != null ? ` · line #${p.row + 1}` : ""));
+    list.append(li);
+  }
+  d.showModal();
 }
 
 // ---------- glossary ----------
@@ -650,15 +1151,13 @@ function glossaryRow(entry = { source: "", target: "", note: "" }) {
     tr.append(td);
   }
   const td = el("td");
-  const del = el("button", "small ghost", "✕");
-  del.title = "Remove";
-  del.addEventListener("click", () => tr.remove());
-  td.append(del);
+  td.append(button("small ghost", "✕", () => tr.remove(), "Remove"));
   tr.append(td);
   return tr;
 }
 
-function openGlossary() {
+async function openGlossary() {
+  try { glossary = await api("/api/glossary"); } catch { /* keep what we have */ }
   const body = $("#glossary-body");
   body.textContent = "";
   glossary.forEach((g) => body.append(glossaryRow(g)));
@@ -676,25 +1175,156 @@ async function saveGlossary() {
     glossary = await api("/api/glossary", entries);
     toast("Glossary saved");
     $("#glossary-dialog").close();
-    if ($("#search").value.trim()) runSearch(); else if (currentScene) openScene(currentScene);
+    await reloadView();
   } catch (err) {
     toast(err.message, true);
   }
 }
 
-// ---------- export / apply ----------
-function updateExportLink() {
-  const fallback = document.querySelector("input[name=fallback]:checked").value;
-  $("#export-link").href = `/api/export?p=${encodeURIComponent(projectId)}&fallback=${fallback}`;
+// ---------- saving to the file ----------
+function renderSaveState(s) {
+  if (!s || !summary) return;
+  summary.save = s;
+  const btn = $("#save-btn"), st = $("#save-state");
+  st.className = "save-state";
+  if (s.mode === "none") {
+    btn.textContent = "Save to file…";
+    btn.title = "Choose where the translated file goes. After that, Save (Ctrl+S) just updates it.";
+    st.textContent = s.error ? "⚠ " + s.error : "Not saved to a file yet";
+    if (s.error) st.classList.add("warn");
+    return;
+  }
+  btn.textContent = "Save";
+  btn.title = `Write the translation to ${s.path || s.name} now (Ctrl+S)`;
+  st.title = s.path || s.name;
+  if (s.error) {
+    st.textContent = "⚠ " + s.error;
+    st.classList.add("warn");
+  } else if (s.pending) {
+    st.textContent = s.mode === "linked" && !s.auto ? `Unsaved changes · ${s.name}` : `Saving… · ${s.name}`;
+  } else {
+    st.textContent = `✓ Saved to ${s.name}` + (s.saved_at ? " · " + timeAgo(s.saved_at) : "");
+    st.classList.add("ok");
+  }
 }
 
-async function openExport() {
+async function saveToFile() {
+  if (!projectId) return;
   if (!(await flushAll())) return;
-  $("#export-info").textContent = `Download ${summary.file} with your translations, in its original format.`;
-  updateExportLink();
-  $("#export-dialog").showModal();
+  if (summary.save.mode === "none") { openSaveDialog(); return; }
+  try {
+    const info = await api("/api/save", {});
+    renderSaveState(info);
+    if (info.error) toast(info.error, true); else toast(`Saved to ${info.name}`);
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
+function fallbackValue() {
+  return document.querySelector("input[name=fallback]:checked").value;
+}
+
+function updateExportLink() {
+  $("#export-link").href = `/api/export?p=${encodeURIComponent(projectId)}&fallback=${fallbackValue()}`;
+  $("#export-link").textContent = `Download a copy (${summary.save.export_name || summary.file})`;
+}
+
+async function openSaveDialog() {
+  if (!(await flushAll())) return;
+  const s = summary.save;
+  const cur = $("#save-current");
+  cur.textContent = "";
+  if (s.mode === "direct") {
+    cur.append("This project edits ", el("code", "", s.path || s.name),
+      " directly – every change is written there by itself a moment after you make it.");
+  } else if (s.mode === "linked") {
+    cur.append("Saving to ", el("code", "", s.path || s.name),
+      s.auto ? " – kept up to date automatically while you translate." : " – updated when you press Save (Ctrl+S).");
+  } else {
+    cur.append("Pick where the translated file should go. You only do this once: after that, Save (Ctrl+S) " +
+      "updates the same file, no more exporting.");
+  }
+  const canChoose = s.mode !== "direct" && summary.owner;
+  $("#save-choose").hidden = !canChoose;
+  $("#save-not-owner").hidden = s.mode === "direct" || summary.owner;
+  if (canChoose) {
+    const opts = $("#save-options");
+    opts.textContent = "";
+    const current = s.path || "";
+    let matched = false;
+    for (const sug of s.suggest || []) {
+      const label = el("label", "radio");
+      const r = Object.assign(el("input"), { type: "radio", name: "save-choice", value: sug.path });
+      if (sug.path === current || (!current && sug.id === "next")) { r.checked = true; matched = true; }
+      const text = el("span");
+      text.append(sug.label, el("br"), el("code", "small", sug.path));
+      label.append(r, text);
+      opts.append(label);
+    }
+    const label = el("label", "radio");
+    const r = Object.assign(el("input"), { type: "radio", name: "save-choice", value: "custom" });
+    r.checked = !matched;
+    const text = el("span", "grow");
+    text.append((s.suggest || []).length ? "Somewhere else:" : "File:");
+    label.append(r, text);
+    opts.append(label);
+    $("#save-path").value = matched ? "" : current;
+    $("#save-path").placeholder = "C:\\…\\" + (s.export_name || "translation.csv");
+    $("#save-browse").hidden = !summary.can_pick;
+    $("#save-auto").checked = s.mode === "linked" ? s.auto : true;
+  }
+  const fb = s.fallback || (/\.json$/i.test(s.export_name || "") ? "source" : "empty");
+  document.querySelector(`input[name=fallback][value=${fb}]`).checked = true;
+  updateExportLink();
+  $("#save-dialog").showModal();
+}
+
+async function chooseOutput(pick) {
+  const choice = document.querySelector("input[name=save-choice]:checked")?.value;
+  const path = pick ? summary.save.path || "" : choice === "custom" || !choice ? $("#save-path").value.trim() : choice;
+  if (!pick && !path) { $("#save-path").focus(); toast("Type the full path of the file, or use Browse.", true); return; }
+  if (pick) toast("Choose the file in the window that opened (it may be behind the browser)…");
+  try {
+    const info = await api("/api/output", { path, pick, auto: $("#save-auto").checked, fallback: fallbackValue() });
+    if (info.cancelled) return;
+    renderSaveState(info);
+    $("#save-dialog").close();
+    if (info.error) toast(info.error, true); else toast(`Saved to ${info.name}. From now on Save updates this file.`);
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// ---------- merge a teammate's file ----------
+async function mergeFile(file) {
+  if (!file) return;
+  if (!(await flushAll())) return;
+  const out = $("#merge-result");
+  out.className = "hint";
+  out.textContent = `Reading ${file.name}…`;
+  const overwrite = $("#merge-overwrite").checked ? 1 : 0;
+  const review = $("#merge-review").checked ? 1 : 0;
+  try {
+    const r = await api(`/api/merge?name=${encodeURIComponent(file.name)}&overwrite=${overwrite}&review=${review}`, file, { raw: true });
+    out.className = "ok";
+    out.textContent = `✓ ${r.filled.toLocaleString()} lines filled in from ${file.name}` +
+      (r.kept ? ` · ${r.kept.toLocaleString()} kept (you already had a different translation)` : "") +
+      (r.same ? ` · ${r.same.toLocaleString()} were already the same` : "") +
+      (r.missing ? ` · ${r.missing.toLocaleString()} not translated in that file` : "");
+    await reloadView();
+  } catch (err) {
+    out.className = "warn";
+    out.textContent = err.message;
+  }
+}
+
+function openMerge() {
+  $("#merge-result").textContent = "";
+  $("#merge-dialog").showModal();
+}
+
+// ---------- apply ----------
 async function applyToGame() {
   if (!(await flushAll())) return;
   const btn = $("#apply-btn");
@@ -723,6 +1353,7 @@ function setupDrop() {
   window.addEventListener("dragenter", (e) => {
     if (!hasFiles(e)) return;
     depth++;
+    overlay.firstElementChild.textContent = $("#merge-dialog").open ? "Drop to merge these translations" : "Drop to start a new project";
     overlay.hidden = false;
   });
   window.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; overlay.hidden = true; } });
@@ -732,18 +1363,23 @@ function setupDrop() {
     e.preventDefault();
     depth = 0;
     overlay.hidden = true;
-    handleFile(e.dataTransfer.files[0]);
+    if ($("#merge-dialog").open) mergeFile(e.dataTransfer.files[0]); else handleFile(e.dataTransfer.files[0]);
   });
   $("#file-input").addEventListener("change", (e) => { handleFile(e.target.files[0]); e.target.value = ""; });
-  $("#dropzone").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#file-input").click(); }
-  });
+  $("#merge-file").addEventListener("change", (e) => { mergeFile(e.target.files[0]); e.target.value = ""; });
+  for (const id of ["#dropzone", "#merge-drop"]) {
+    $(id).addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $(id).querySelector("input").click(); }
+    });
+  }
 }
 
 // ---------- start ----------
 function init() {
   setupDrop();
+  showMe();
   $("#home-btn").addEventListener("click", showStart);
+  $("#open-btn").addEventListener("click", openFromDisk);
   $("#group-select").addEventListener("change", async () => {
     const sel = $("#group-select");
     if (!(await flushAll())) { sel.value = currentGroup; return; }
@@ -754,7 +1390,7 @@ function init() {
   $("#scene-filter").addEventListener("input", renderScenes);
   let searchTimer;
   $("#search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 300); });
-  $("#state-filter").addEventListener("change", () => ($("#search").value.trim() ? runSearch() : currentScene && openScene(currentScene)));
+  $("#state-filter").addEventListener("change", () => ($("#search").value.trim() ? runSearch() : currentScene !== null && openScene(currentScene)));
   $("#next-btn").addEventListener("click", nextUnfinished);
   $("#glossary-btn").addEventListener("click", openGlossary);
   $("#glossary-add").addEventListener("click", () => {
@@ -764,16 +1400,34 @@ function init() {
   });
   $("#glossary-save").addEventListener("click", saveGlossary);
   $("#help-btn").addEventListener("click", () => $("#help-dialog").showModal());
-  $("#export-btn").addEventListener("click", openExport);
+  $("#save-btn").addEventListener("click", saveToFile);
+  $("#save-menu-btn").addEventListener("click", openSaveDialog);
+  $("#save-state").addEventListener("click", openSaveDialog);
+  $("#save-apply").addEventListener("click", () => chooseOutput(false));
+  $("#save-browse").addEventListener("click", () => chooseOutput(true));
+  $("#save-path").addEventListener("focus", () => { document.querySelector("input[name=save-choice][value=custom]").checked = true; });
   document.querySelectorAll("input[name=fallback]").forEach((r) => r.addEventListener("change", updateExportLink));
+  $("#merge-btn").addEventListener("click", openMerge);
+  $("#share-btn").addEventListener("click", openShare);
+  $("#me-btn").addEventListener("click", askName);
+  $("#name-save").addEventListener("click", saveName);
+  $("#name-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveName(); } });
   $("#apply-btn").addEventListener("click", applyToGame);
   $("#setup-create").addEventListener("click", createProject);
   $("#setup-cancel").addEventListener("click", cancelSetup);
   $("#setup-dialog").addEventListener("cancel", (e) => { e.preventDefault(); cancelSetup(); });
+  $("#setup-label").addEventListener("input", updateSetupSaveName);
   for (const id of ["#map-source", "#map-target"]) $(id).addEventListener("change", renderPreview);
   $("#tag-preset").addEventListener("change", () => { $("#tag-custom-wrap").hidden = $("#tag-preset").value !== "custom"; });
+  document.addEventListener("keydown", (e) => {
+    if (e.key.toLowerCase() === "s" && (e.ctrlKey || e.metaKey) && !e.shiftKey && projectId && !$("#editor").hidden) {
+      e.preventDefault();
+      saveToFile();
+    }
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && projectId) pollNow(); });
   window.addEventListener("beforeunload", (e) => {
-    if (cards.some((c) => c.ta.value !== c.saved)) e.preventDefault();
+    if (cards.some((c) => c.ta.value !== c.saved || c.pending)) e.preventDefault();
   });
 
   const fromHash = () => new URLSearchParams(location.hash.slice(1)).get("p");
