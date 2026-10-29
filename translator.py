@@ -145,6 +145,9 @@ class Project:
             self.table = formats.read_table(self.csv_path, self.delimiter)
             self.fieldnames = list(self.table.fieldnames)
             self.rows = self.table.rows
+            # A game's CSV usually has no status column. Editing it in place, the "needs review"
+            # flags go into the notes file instead, so the CSV keeps exactly the game's columns.
+            self.virtual_status = not self.source and self.cols["status"] not in self.fieldnames
             for role in ("target", "status"):
                 col = self.cols[role]
                 if col not in self.fieldnames:
@@ -162,6 +165,10 @@ class Project:
                         self.meta = {int(k): v for k, v in json.load(fh).items()}
                 except (ValueError, OSError):
                     pass
+            status = self.cols["status"]
+            for i, m in self.meta.items():
+                if m.get("status") and i < len(self.rows) and not self.rows[i][status]:
+                    self.rows[i][status] = m["status"]
             self.claims = self.read_json(self.claims_path, {})
             if self.repo:
                 found = gitsync.load_conflicts(self.repo, gitsync.rel(self.repo, self.csv_path))
@@ -212,10 +219,14 @@ class Project:
     def apply_entry(self, e):
         i = e["row"]
         r = self.rows[i]
+        m = self.meta.setdefault(i, {})
         if "target" in e:
             r[self.cols["target"]] = e["target"]
             r[self.cols["status"]] = e["status"]
-        m = self.meta.setdefault(i, {})
+            if self.virtual_status and e["status"] in REVIEW_STATES:
+                m["status"] = e["status"]
+            else:
+                m.pop("status", None)
         for k in ("by", "at", "note", "note_by", "note_at"):
             if k in e:
                 m[k] = e[k]
@@ -300,7 +311,7 @@ class Project:
         if self.external_change():
             self.reload_from_disk()
         # only rows that changed are rewritten: small, clean diffs for git
-        write_atomic(self.csv_path, self.table.dump(self.fieldnames, self.rows))
+        write_atomic(self.csv_path, self.table.dump(self.csv_fields(), self.rows))
         self.csv_mtime = os.path.getmtime(self.csv_path)
         if self.meta or os.path.exists(self.meta_path):
             notes = gitsync.dump_json({str(k): v for k, v in self.meta.items()}, self.meta_path)
@@ -312,6 +323,10 @@ class Project:
         self.dirty_since = None
         self.saved_at = time.time()
         self.write_error = None
+
+    def csv_fields(self):
+        """The columns written into the CSV."""
+        return [f for f in self.fieldnames if not (self.virtual_status and f == self.cols["status"])]
 
     def tick(self, force=False):
         """Called twice a second by the background writer."""
@@ -653,9 +668,7 @@ class Project:
         origin = (self.source or {}).get("origin")
         if not origin:
             return []
-        return [{"id": "next", "path": os.path.join(os.path.dirname(origin), self.export_name()),
-                 "label": "Next to the original, as a new file"},
-                {"id": "original", "path": origin, "label": "Into the original file (it gets your translation column)"
+        return [{"id": "original", "path": origin, "label": "Into the original file (it gets your translation column)"
                  if self.source.get("format") == "csv" else "Into the original file (replaces its texts!)"}]
 
     def save_info(self, owner=True):
@@ -677,6 +690,16 @@ class Project:
 
     def write_output(self):
         out = self.output
+        written = out.get("written_mtime")
+        try:
+            changed = written is not None and os.path.getmtime(out["path"]) != written
+        except OSError:
+            changed = False
+        if changed:
+            self.output_error = (f"{os.path.basename(out['path'])} was changed outside the editor (a Pull?), so it was "
+                                 "not overwritten. On the start screen, press “Use the file itself” on this project.")
+            self.output_next_try = time.time() + 3600
+            return False
         try:
             data, _ = self.export_bytes(out.get("fallback", self.default_fallback()) == "source")
             write_atomic(out["path"], data)
@@ -691,7 +714,19 @@ class Project:
         self.output_dirty = False
         self.output_error = None
         self.output_saved_at = time.time()
+        out["written_mtime"] = os.path.getmtime(out["path"])
+        self.cfg["output"] = out
+        write_atomic(self.config_path, json.dumps(self.cfg, ensure_ascii=False, indent=2).encode("utf-8"))
         return True
+
+    def linked_csv(self):
+        """For an older project that keeps its own copy: the CSV on disk that copy is written into."""
+        if not self.source or self.source.get("format") != "csv":
+            return None
+        for path in ((self.output or {}).get("path"), self.source.get("origin")):
+            if path and path.lower().endswith((".csv", ".tsv")) and os.path.isfile(path):
+                return path
+        return None
 
     def default_fallback(self):
         # A game JSON must be complete to work; in a table an empty cell shows what is still missing.
@@ -840,6 +875,9 @@ class Library:
                 entry.update(name=proj.name, file=proj.display_file(), modified=os.path.getmtime(proj.csv_path),
                              online=proj.online(), shared=bool(proj.repo), behind=proj.git.get("behind", 0),
                              **proj.counts())
+                linked = proj.linked_csv()
+                if linked:  # an older project with its own copy: it can't see a Pull
+                    entry.update(old_copy=os.path.basename(linked))
             except Exception as e:  # e.g. a saved project whose CSV isn't on this computer
                 entry.update(name=os.path.splitext(os.path.basename(p))[0], error=str(e))
             out.append(entry)
@@ -972,8 +1010,8 @@ class Library:
         }
         re.compile(cfg["tag_pattern"])  # refuse a broken custom pattern now, not later in the browser
         save_to = data.get("save_to") or {}
-        if save_to.get("choice") == "inplace":
-            return self.create_shared(cfg, source, folder)
+        if save_to and source.get("origin") and source.get("format") == "csv":
+            return self.create_shared(cfg, source, folder)  # the opened file itself is the project
         with open(os.path.join(folder, "project.json"), "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, ensure_ascii=False, indent=2)
         os.remove(os.path.join(folder, "draft.json"))
@@ -981,8 +1019,8 @@ class Library:
         if save_to:
             proj = self.get(pid)
             path = save_to.get("path")
-            if save_to.get("choice") in ("next", "original"):
-                path = next(s["path"] for s in proj.suggestions() if s["id"] == save_to["choice"])
+            if save_to.get("choice") in ("original", "inplace"):
+                path = source["origin"]
             proj.set_output(path, save_to.get("auto", True))
         return {"id": pid}
 
@@ -992,28 +1030,90 @@ class Library:
         origin = source.get("origin")
         if not origin or source.get("format") != "csv":
             raise ValueError("Only a CSV/TSV opened with “Open a file…” can be edited in place.")
-        stem = os.path.splitext(origin)[0]
+        if os.path.exists(os.path.splitext(origin)[0] + gitsync.CONFIG_SUFFIX):
+            raise ValueError(f"{os.path.basename(origin)} already has a project – open that file instead.")
+        pid = self.make_shared(cfg, origin, source.get("delimiter", ","))
+        shutil.rmtree(folder)  # the copy in workspace/ isn't needed
+        return {"id": pid}
+
+    def make_shared(self, cfg, csv_path, delimiter):
+        stem = os.path.splitext(csv_path)[0]
         cfg_path = stem + gitsync.CONFIG_SUFFIX
-        if os.path.exists(cfg_path):
-            raise ValueError(f"{os.path.basename(cfg_path)} already exists – open that file instead.")
         shared = {
             "name": cfg["name"],
-            "csv": os.path.basename(origin),
-            "delimiter": source.get("delimiter", ","),
+            "csv": os.path.basename(csv_path),
+            "delimiter": delimiter,
             "glossary": os.path.basename(stem) + ".glossary.json",
             "columns": cfg["columns"],
-            "tag_pattern": cfg["tag_pattern"],
+            "tag_pattern": cfg.get("tag_pattern", ""),
         }
         write_atomic(cfg_path, (json.dumps(shared, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-        shutil.rmtree(folder)  # the copy in workspace/ isn't needed
         self.remember(cfg_path)
         pid = self.pid(cfg_path)
         proj = self.get(pid)
-        if proj.fieldnames != proj.table.fieldnames:  # add the translation/status columns right away
+        if proj.csv_fields() != proj.table.fieldnames:  # add the translation column right away
             with proj.lock:
                 proj.mark_dirty()
                 proj.save()
-        return {"id": pid}
+        return pid
+
+    def convert(self, pid):
+        """Switch an older project (its own copy, written into a file) to editing that file itself,
+        so a Pull shows up. The file's text wins; the copy adds what the file doesn't have yet -
+        lines not written into it, "needs review" flags and notes. The copy goes to workspace/.old."""
+        old = self.get(pid)
+        path = old.linked_csv()
+        if not path:
+            raise ValueError("This project isn't linked to a CSV file on this computer.")
+        with old.lock:
+            if old.dirty_since is not None:
+                old.save()  # its own copy only - the linked file may hold teammates' newer lines
+        cfg_path = project_file_for(path)
+        if cfg_path:
+            self.remember(cfg_path)
+            new_pid = self.pid(cfg_path)
+        else:
+            new_pid = self.make_shared(old.cfg, path, formats.read_table(path).delimiter)
+        new = self.get(new_pid)
+        done = {"lines": 0, "flags": 0, "notes": 0, "theirs": 0}
+        with new.lock:
+            okey, nkey = old.col("key"), new.col("key")
+            if okey and nkey:
+                where = {}
+                for j, r in enumerate(new.rows):
+                    where.setdefault(r.get(nkey, ""), j)
+                pairs = [(i, where[r.get(okey, "")]) for i, r in enumerate(old.rows) if r.get(okey, "") in where]
+            else:
+                pairs = [(i, i) for i in range(len(old.rows))] if len(old.rows) == len(new.rows) else []
+            ot, ost, nt = old.cols["target"], old.cols["status"], new.cols["target"]
+            for i, j in pairs:
+                r, m, nm = old.rows[i], old.meta.get(i, {}), new.meta.get(j, {})
+                mine, theirs, status = r.get(ot, ""), new.rows[j].get(nt, ""), r.get(ost, "")
+                by, at = m.get("by", ""), m.get("at") or time.time()
+                if mine.strip() and not theirs.strip():  # never got written into the file
+                    new.commit({"row": j, "target": mine, "status": status, "by": by, "at": at})
+                    done["lines"] += 1
+                elif mine.strip() and mine != theirs:  # changed in the file since (a teammate): theirs stays
+                    done["theirs"] += 1
+                elif mine.strip() and status in REVIEW_STATES and new.states[j] != "review":
+                    new.commit({"row": j, "target": theirs, "status": status, "by": by, "at": at})
+                    done["flags"] += 1
+                if m.get("note") and not nm.get("note"):
+                    new.commit({"row": j, "note": m["note"], "note_by": m.get("note_by", ""),
+                                "note_at": m.get("note_at") or time.time()})
+                    done["notes"] += 1
+            if new.dirty_since is not None:
+                new.save()
+        with self.lock:
+            self.loaded.pop(pid, None)
+        trash = os.path.join(WORKSPACE_DIR, ".old")
+        os.makedirs(trash, exist_ok=True)
+        name = os.path.basename(old.base)
+        dest, n = os.path.join(trash, name), 2
+        while os.path.exists(dest):
+            dest, n = os.path.join(trash, f"{name}-{n}"), n + 1
+        shutil.move(old.base, dest)
+        return dict(done, id=new_pid, file=os.path.basename(path))
 
     def discard_draft(self, slug):
         folder = os.path.normpath(os.path.join(WORKSPACE_DIR, slug))
@@ -1212,6 +1312,9 @@ def make_handler(library):
                 if url.path == "/api/discard":
                     library.discard_draft(data.get("draft", ""))
                     return self.send_json({"ok": True})
+                if url.path == "/api/convert":
+                    self.owner_only()
+                    return self.send_json(library.convert(data.get("id", "")))
                 p = library.get(q.get("p"))
                 user = self.user()
                 if url.path == "/api/line":
