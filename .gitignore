@@ -14,3 +14,6 @@ _backup_original/
 __pycache__/
 *.pyc
 .venv/
+
+# Files dropped into the editor (your projects)
+workspace/

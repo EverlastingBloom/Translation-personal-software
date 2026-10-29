@@ -7,19 +7,44 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">
-    <span class="logo" aria-hidden="true">文A</span>
-    <div>
-      <h1 id="project-name">Translation Editor</h1>
-      <div class="progress-text" id="progress-text"></div>
+<!-- ======================= start screen ======================= -->
+<section id="start" class="start" hidden>
+  <div class="start-inner">
+    <div class="start-brand">
+      <span class="logo big" aria-hidden="true">文A</span>
+      <div>
+        <h1>Translation Editor</h1>
+        <p class="muted">Translate game text line by line. Your files stay on this computer.</p>
+      </div>
     </div>
+
+    <label id="dropzone" class="dropzone" tabindex="0">
+      <input id="file-input" type="file" accept=".csv,.tsv,.txt,.json" hidden>
+      <span class="drop-icon" aria-hidden="true">⇪</span>
+      <strong>Drop a file here</strong>
+      <span class="muted">or click to choose one · CSV, TSV or JSON</span>
+    </label>
+
+    <h2 class="list-title">Your projects</h2>
+    <div id="project-list" class="project-list"></div>
   </div>
+</section>
+
+<!-- ======================= editor ======================= -->
+<div id="editor" class="editor" hidden>
+<header class="topbar">
+  <button id="home-btn" class="brand" title="All projects">
+    <span class="logo" aria-hidden="true">文A</span>
+    <span class="brand-text">
+      <span id="project-name" class="project-name">Translation Editor</span>
+      <span class="progress-text" id="progress-text"></span>
+    </span>
+  </button>
   <div class="progress" id="progress" title="Done / needs review / untranslated">
     <span class="bar done"></span><span class="bar review"></span>
   </div>
   <div class="tools">
-    <input id="search" type="search" placeholder="Search English, translation or speaker…" autocomplete="off">
+    <input id="search" type="search" placeholder="Search text, translation, speaker or key…" autocomplete="off">
     <select id="state-filter" title="Show lines">
       <option value="all">All lines</option>
       <option value="untranslated">Untranslated</option>
@@ -28,6 +53,7 @@
     </select>
     <button id="glossary-btn" class="ghost">Glossary</button>
     <button id="help-btn" class="ghost" title="Keyboard shortcuts">?</button>
+    <button id="export-btn" class="ghost" title="Download the translated file">Export</button>
     <button id="apply-btn" class="primary" hidden>Apply</button>
   </div>
 </header>
@@ -52,20 +78,73 @@
     <div id="lines" class="lines"></div>
   </main>
 </div>
+</div>
 
-<dialog id="glossary-dialog">
+<div id="drop-overlay" class="drop-overlay" hidden><div>Drop to start a new project</div></div>
+
+<!-- ======================= dialogs ======================= -->
+<dialog id="setup-dialog" class="wide">
+  <div class="dialog-head">
+    <h3>New project</h3>
+    <button id="setup-cancel" class="ghost" type="button">Cancel</button>
+  </div>
+  <p class="hint" id="setup-info"></p>
+  <div class="setup-grid">
+    <label>Project name <input id="setup-name"></label>
+    <label>Translating into <input id="setup-label" placeholder="e.g. Indonesian"></label>
+    <label>Text to translate (required) <select id="map-source"></select></label>
+    <label>Save translation in
+      <select id="map-target"></select>
+    </label>
+    <label>Speaker / character <select id="map-speaker"></select></label>
+    <label>Key / ID <select id="map-key"></select></label>
+    <label>Section (sidebar) <select id="map-group"></select></label>
+    <label>Scene (sidebar) <select id="map-subgroup"></select></label>
+    <label>Reference to show <select id="map-reference"></select></label>
+    <label>Codes that must not change
+      <select id="tag-preset"></select>
+    </label>
+    <label id="tag-custom-wrap" class="span2" hidden>Custom pattern (regular expression)
+      <input id="tag-custom" placeholder="\{[^}]*\}">
+    </label>
+  </div>
+  <p class="hint">Without a scene column, lines are grouped in pages of 50. Preview of the first lines:</p>
+  <div class="preview-wrap"><table id="preview" class="preview"></table></div>
+  <div class="dialog-actions">
+    <span class="hint" id="setup-error"></span>
+    <button id="setup-create" class="primary" type="button">Start translating</button>
+  </div>
+</dialog>
+
+<dialog id="glossary-dialog" class="wide">
   <form method="dialog" class="dialog-head">
     <h3>Glossary</h3>
     <button class="ghost" value="close">Close</button>
   </form>
   <p class="hint">Terms found in a line show up under it. Click one to insert its translation.</p>
   <table class="glossary-table">
-    <thead><tr><th>English</th><th>Translation</th><th>Note</th><th></th></tr></thead>
+    <thead><tr><th>Original</th><th>Translation</th><th>Note</th><th></th></tr></thead>
     <tbody id="glossary-body"></tbody>
   </table>
   <div class="dialog-actions">
     <button id="glossary-add" class="ghost">+ Add term</button>
     <button id="glossary-save" class="primary">Save glossary</button>
+  </div>
+</dialog>
+
+<dialog id="export-dialog">
+  <form method="dialog" class="dialog-head">
+    <h3>Export</h3>
+    <button class="ghost" value="close">Close</button>
+  </form>
+  <p class="hint" id="export-info"></p>
+  <label class="radio"><input type="radio" name="fallback" value="source" checked>
+    Untranslated lines keep the original text <span class="muted">(a complete, usable file)</span></label>
+  <label class="radio"><input type="radio" name="fallback" value="empty">
+    Untranslated lines stay empty <span class="muted">(easy to spot what's missing)</span></label>
+  <div class="dialog-actions">
+    <span></span>
+    <a id="export-link" class="button primary" href="#" download>Download</a>
   </div>
 </dialog>
 
@@ -78,10 +157,11 @@
     <tr><td><kbd>Ctrl</kbd> + <kbd>Enter</kbd></td><td>Save, mark done, go to next line</td></tr>
     <tr><td><kbd>Alt</kbd> + <kbd>↓</kbd> / <kbd>↑</kbd></td><td>Next / previous line</td></tr>
     <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>Save this line</td></tr>
-    <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd></td><td>Copy the English into the box</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd></td><td>Copy the original text into the box</td></tr>
     <tr><td><kbd>Esc</kbd></td><td>Undo unsaved changes in this line</td></tr>
   </table>
-  <p class="hint">Lines save automatically when you leave the box. Tags like <code>[panel=1]</code> must stay exactly as in the English; a warning appears if they don't match.</p>
+  <p class="hint">Lines save automatically when you leave the box. Codes like <code>[panel=1]</code> or <code>{0}</code>
+    must all stay in the translation (their order may change); a warning appears if one is missing.</p>
 </dialog>
 
 <dialog id="apply-dialog">
