@@ -18,3 +18,6 @@ __pycache__/
 
 # Files dropped into the editor (your projects)
 workspace/
+
+# This computer only: projects opened from other folders
+settings.json

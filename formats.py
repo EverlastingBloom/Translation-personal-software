@@ -24,16 +24,22 @@ class FormatError(Exception):
     pass
 
 
-def decode(raw):
-    """Bytes from an unknown text file -> str."""
+def decode_with_encoding(raw):
+    """Bytes from an unknown text file -> (str, encoding, had_bom), so it can be written back the same way."""
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return raw.decode("utf-16")
-    for enc in ("utf-8-sig", "cp1252"):
+        return raw.decode("utf-16"), "utf-16", False
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    for enc in ("utf-8", "cp1252"):
         try:
-            return raw.decode(enc)
+            return raw[3 if bom else 0:].decode(enc), enc, bom
         except UnicodeDecodeError:
             continue
-    return raw.decode("latin-1")
+    return raw.decode("latin-1"), "latin-1", False
+
+
+def decode(raw):
+    """Bytes from an unknown text file -> str."""
+    return decode_with_encoding(raw)[0]
 
 
 def strip_json_comments(text):
@@ -146,6 +152,106 @@ def parse(filename, text):
         return fields, rows, {"format": "csv", "delimiter": delim}
     raise FormatError(f"'{ext or filename}' files aren't supported yet. Use CSV, TSV or JSON "
                       "(Excel: File > Save As > CSV UTF-8).")
+
+
+def split_records(text, quote='"'):
+    """Raw CSV records, each with its own line ending. A record continues onto the next line
+    while a quoted cell is still open (texts with line breaks in them)."""
+    parts = text.split("\n")
+    lines = [p + "\n" for p in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+    out, acc, n = [], [], 0
+    for line in lines:
+        acc.append(line)
+        n += line.count(quote)
+        if n % 2 == 0:
+            out.append("".join(acc))
+            acc, n = [], 0
+    if acc:
+        out.append("".join(acc))
+    return out
+
+
+def line_end(raw):
+    return "\r\n" if raw.endswith("\r\n") else "\n" if raw.endswith("\n") else ""
+
+
+class Table:
+    """A CSV/TSV file that is written back exactly as it was read, except the rows that changed.
+
+    Quoting, line endings, encoding and blank lines of untouched rows stay byte for byte the
+    same, so a commit shows only the lines someone translated and git can merge the work of
+    several translators without tripping over formatting."""
+
+    def __init__(self, text, delimiter=None, ext=".csv", encoding="utf-8", bom=False):
+        self.encoding, self.bom = encoding, bom
+        self.delimiter = delimiter or sniff_delimiter(text, ext)
+        self.newline = "\r\n" if "\r\n" in text[:20000] else "\n"
+        records = split_records(text)
+        if not records:
+            raise FormatError("The file is empty.")
+        self.header_raw = records[0]
+        header = self.parse(records[0])
+        self.fieldnames = unique_headers(header)
+        body = self.header_raw.rstrip("\r\n")
+        self.quote_all = bool(header) and body.startswith('"') and body.endswith('"') \
+            and body.count('"') >= 2 * len(header)
+        self.rows, self.orig, self.raw, self.items = [], [], [], []
+        for rec in records[1:]:
+            cells = self.parse(rec)
+            if not any(c.strip() for c in cells):
+                self.items.append(rec)  # blank line: kept as it is
+                continue
+            cells = cells + [""] * (len(self.fieldnames) - len(cells))
+            row = dict(zip(self.fieldnames, cells))
+            self.items.append(len(self.rows))
+            self.rows.append(row)
+            self.orig.append(dict(row))
+            self.raw.append(rec)
+
+    def parse(self, rec):
+        try:
+            return next(csv.reader(io.StringIO(rec), delimiter=self.delimiter))
+        except StopIteration:
+            return []
+
+    def format_row(self, cells, end):
+        buf = io.StringIO()
+        csv.writer(buf, delimiter=self.delimiter, lineterminator=end or "",
+                   quoting=csv.QUOTE_ALL if self.quote_all else csv.QUOTE_MINIMAL).writerow(cells)
+        return buf.getvalue()
+
+    def dump(self, fieldnames, rows):
+        """File bytes for these rows. Rows still equal to what was read keep their original text."""
+        fieldnames = list(fieldnames)
+        same_cols = fieldnames == self.fieldnames
+        out = [self.header_raw if same_cols else self.format_row(fieldnames, line_end(self.header_raw) or self.newline)]
+        for item in self.items:
+            if isinstance(item, str):
+                out.append(item)
+                continue
+            if item >= len(rows):
+                continue
+            r = rows[item]
+            if same_cols and all(r.get(f, "") == self.orig[item].get(f, "") for f in fieldnames):
+                out.append(self.raw[item])
+            else:
+                out.append(self.format_row([r.get(f, "") for f in fieldnames], line_end(self.raw[item])))
+        for r in rows[len(self.rows):]:  # rows added (e.g. by a merge)
+            if not out[-1].endswith("\n"):
+                out[-1] += self.newline
+            out.append(self.format_row([r.get(f, "") for f in fieldnames], self.newline))
+        text = "".join(out)
+        try:
+            data = text.encode(self.encoding)
+        except UnicodeEncodeError:  # a translation needs letters the old encoding can't store
+            data, self.encoding = text.encode("utf-8"), "utf-8"
+        return (b"\xef\xbb\xbf" if self.bom and self.encoding == "utf-8" else b"") + data
+
+
+def read_table(path, delimiter=None, ext=None):
+    with open(path, "rb") as fh:
+        text, enc, bom = decode_with_encoding(fh.read())
+    return Table(text, delimiter, ext or os.path.splitext(path)[1].lower(), enc, bom)
 
 
 def as_text(v):

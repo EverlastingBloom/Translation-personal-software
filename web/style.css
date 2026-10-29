@@ -360,3 +360,26 @@ a.link { color: var(--accent); align-self: center; }
   #search { width: 100%; }
   .setup-grid { grid-template-columns: 1fr; }
 }
+
+/* git: translating with people anywhere */
+.sync-btn { display: inline-flex; align-items: center; gap: 4px; }
+.sync-btn[hidden] { display: none; }
+.sync-badge { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sync-badge:empty { display: none; }
+.sync-btn.has-news { border-color: var(--done); }
+.sync-btn.has-news .sync-badge { color: var(--done); font-weight: 600; }
+.head-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.head-actions [hidden] { display: none; }
+.conflict-bar {
+  max-width: 980px; margin: 0 auto 12px; display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  border: 1px solid var(--warn); border-radius: 10px; padding: 8px 12px; font-size: 14px; background: var(--panel);
+}
+.conflict-bar[hidden] { display: none; }
+.claim-tag { font-size: 11px; border: 1px solid; border-radius: 99px; padding: 0 6px; float: right; margin-left: 4px; }
+.shared-tag { color: var(--accent); }
+.team-more { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 10px; }
+.team-more summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.git-status { list-style: none; padding: 0; margin: 6px 0 10px; display: grid; gap: 4px; }
+.git-status .news { color: var(--done); font-weight: 600; }
+.activity li { flex-wrap: wrap; font-size: 13px; }
+.save-choice label[hidden] { display: none; }
