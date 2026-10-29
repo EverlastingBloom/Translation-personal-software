@@ -165,6 +165,32 @@ function setBar(container, done, review, total) {
   r.style.width = total ? (100 * review / total) + "%" : "0";
 }
 
+/**
+ * Where a project / section / scene stands. "Done" and "translated" are not the same: a line
+ * flagged "needs review" is translated but not done, so a section is only complete when
+ * nothing is left to translate AND nothing is left to review.
+ *   complete  every line done
+ *   review    everything translated, some lines still need review
+ *   open      lines still untranslated
+ */
+function progress(c) {
+  const review = c.review || 0;
+  const left = Math.max(0, c.total - c.done - review);
+  const pct = c.total ? Math.floor(100 * c.done / c.total) : 0; // floor: never "100%" while one line is open
+  const state = left ? "open" : review ? "review" : "complete";
+  const n = (x) => x.toLocaleString();
+  return {
+    state, review, left, pct,
+    // sidebar scenes and the section list: short
+    short: state === "complete" ? "✓ Complete" : state === "review" ? `⚑ ${n(review)} to review`
+      : `${n(c.done)}/${n(c.total)}` + (review ? ` · ⚑ ${n(review)}` : ""),
+    // project list and section stats: a bit more
+    text: state === "complete" ? `✓ Complete · ${n(c.total)} lines`
+      : state === "review" ? `All translated · ⚑ ${n(review)} still to review`
+      : `${pct}% done · ${n(left)} untranslated` + (review ? ` · ⚑ ${n(review)} to review` : ""),
+  };
+}
+
 function miniBar(done, review, total) {
   const mini = el("span", "mini");
   mini.append(el("span", "seg-done"), el("span", "seg-review"));
@@ -260,12 +286,11 @@ async function showStart() {
       card.append(el("span", "warn small", "Can't open: " + p.error));
       card.disabled = true;
     } else {
-      const pct = p.total ? Math.floor(100 * p.done / p.total) : 0;
+      const pr = progress(p);
       const meta = el("span", "project-meta");
-      meta.append(miniBar(p.done, p.review, p.total),
-        el("span", "", `${pct}% · ${p.done.toLocaleString()}/${p.total.toLocaleString()}`));
+      meta.append(miniBar(p.done, p.review, p.total), el("span", "progress-label " + pr.state, pr.text));
       const foot = el("span", "project-foot muted small");
-      foot.append((p.review ? `${p.review.toLocaleString()} to review · ` : "") + "edited " + timeAgo(p.modified));
+      foot.append("edited " + timeAgo(p.modified));
       if (p.shared) foot.append(el("span", "shared-tag", p.behind ? `⇅ team · ${p.behind} update${p.behind === 1 ? "" : "s"} waiting` : "⇅ team"));
       if (p.online?.length) {
         const here = el("span", "online");
@@ -508,15 +533,20 @@ async function loadSummary() {
     total: a.total + g.total, done: a.done + g.done, review: a.review + g.review,
   }), { total: 0, done: 0, review: 0 });
   setBar($("#progress"), t.done, t.review, t.total);
-  const pct = t.total ? Math.floor(100 * t.done / t.total) : 0;
-  $("#progress-text").textContent =
-    `${t.done.toLocaleString()} of ${t.total.toLocaleString()} lines done (${pct}%) · ${t.review.toLocaleString()} need review`;
+  const pr = progress(t);
+  const pt = $("#progress-text");
+  pt.className = "progress-text " + pr.state;
+  pt.textContent = pr.state === "complete" ? `✓ Complete – all ${t.total.toLocaleString()} lines done`
+    : pr.state === "review" ? `All ${t.total.toLocaleString()} lines translated · ⚑ ${pr.review.toLocaleString()} still need review`
+    : `${t.done.toLocaleString()} of ${t.total.toLocaleString()} lines done (${pr.pct}%) · ` +
+      `${pr.left.toLocaleString()} untranslated` + (pr.review ? ` · ⚑ ${pr.review.toLocaleString()} to review` : "");
 
   const sel = $("#group-select");
   const keep = currentGroup;
   sel.textContent = "";
   for (const g of summary.groups) {
-    const o = el("option", "", `${g.name}  (${Math.floor(100 * g.done / g.total)}%)`);
+    const gp = progress(g);
+    const o = el("option", "", `${g.name} — ${gp.state === "open" ? gp.pct + "%" + (gp.review ? " · ⚑ " + gp.review : "") : gp.short}`);
     o.value = g.name;
     sel.append(o);
   }
@@ -531,8 +561,11 @@ async function loadSummary() {
 function showGroupStats() {
   const g = summary.groups.find((x) => x.name === $("#group-select").value);
   if (!g) return;
-  $("#group-stats").textContent =
-    `${g.done} done · ${g.review} to review · ${g.untranslated} untranslated · ${g.total} total`;
+  const pr = progress(g);
+  const box = $("#group-stats");
+  box.textContent = "";
+  box.append(el("div", "progress-label " + pr.state, pr.text),
+    el("div", "", `${g.done} done · ${g.review} to review · ${g.untranslated} untranslated · ${g.total} total`));
 }
 
 async function loadScenes(group) {
@@ -544,8 +577,9 @@ async function loadScenes(group) {
 }
 
 function sceneMeta(s) {
+  const pr = progress(s);
   const meta = el("span", "scene-meta");
-  meta.append(miniBar(s.done, s.review, s.total), el("span", "", `${s.done}/${s.total}`));
+  meta.append(miniBar(s.done, s.review, s.total), el("span", "progress-label " + pr.state, pr.short));
   return meta;
 }
 
@@ -557,7 +591,7 @@ function renderScenes() {
   const frag = document.createDocumentFragment();
   for (const s of scenes) {
     if (filter && !s.title.toLowerCase().includes(filter)) continue;
-    const b = el("button", "scene" + (s.id === currentScene ? " active" : ""));
+    const b = el("button", `scene is-${progress(s).state}` + (s.id === currentScene ? " active" : ""));
     b.type = "button";
     b.dataset.id = s.id;
     const here = el("span", "scene-people");
@@ -581,7 +615,10 @@ function renderScenes() {
 function updateSceneMeta() {
   for (const s of scenes) {
     const b = sceneButtons.get(s.id);
-    if (b) b.lastElementChild.replaceWith(sceneMeta(s));
+    if (!b) continue;
+    b.lastElementChild.replaceWith(sceneMeta(s));
+    b.classList.remove("is-complete", "is-review", "is-open");
+    b.classList.add("is-" + progress(s).state);
   }
   showClaim();
 }

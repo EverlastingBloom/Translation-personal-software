@@ -383,3 +383,13 @@ a.link { color: var(--accent); align-self: center; }
 .git-status .news { color: var(--done); font-weight: 600; }
 .activity li { flex-wrap: wrap; font-size: 13px; }
 .save-choice label[hidden] { display: none; }
+
+/* progress: complete vs. still to review vs. still to translate */
+.progress-label.complete { color: var(--done); font-weight: 600; }
+.progress-label.review { color: var(--review); font-weight: 600; }
+.progress-text.complete { color: var(--done); }
+.progress-text.review { color: var(--review); }
+.group-stats .progress-label { font-size: 14px; }
+.scene.is-complete .scene-title { color: var(--muted); }
+.scene.is-review { box-shadow: inset 3px 0 0 var(--review); }
+.scene.is-review.active { box-shadow: inset 3px 0 0 var(--accent); }
