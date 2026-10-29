@@ -1,0 +1,16 @@
+# Translation data and game files stay on your own computer, not in the repo
+*.csv
+*.csv.tmp
+*.bundle
+*.assets
+catalog.json
+_backup_original/
+
+# Secrets
+*api_key*.txt
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/

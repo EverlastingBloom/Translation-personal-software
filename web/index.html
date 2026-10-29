@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Translation Editor</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">文A</span>
+    <div>
+      <h1 id="project-name">Translation Editor</h1>
+      <div class="progress-text" id="progress-text"></div>
+    </div>
+  </div>
+  <div class="progress" id="progress" title="Done / needs review / untranslated">
+    <span class="bar done"></span><span class="bar review"></span>
+  </div>
+  <div class="tools">
+    <input id="search" type="search" placeholder="Search English, translation or speaker…" autocomplete="off">
+    <select id="state-filter" title="Show lines">
+      <option value="all">All lines</option>
+      <option value="untranslated">Untranslated</option>
+      <option value="review">Needs review</option>
+      <option value="done">Done</option>
+    </select>
+    <button id="glossary-btn" class="ghost">Glossary</button>
+    <button id="help-btn" class="ghost" title="Keyboard shortcuts">?</button>
+    <button id="apply-btn" class="primary" hidden>Apply</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <label class="side-label" for="group-select">Section</label>
+    <select id="group-select"></select>
+    <div class="group-stats" id="group-stats"></div>
+    <input id="scene-filter" type="search" placeholder="Filter scenes…" autocomplete="off">
+    <nav id="scene-list" class="scene-list" aria-label="Scenes"></nav>
+  </aside>
+
+  <main class="content">
+    <div class="content-head">
+      <div>
+        <div class="crumb" id="crumb"></div>
+        <h2 id="scene-title">Pick a scene on the left</h2>
+      </div>
+      <button id="next-btn" class="ghost" title="Jump to the next line that is not done">Next unfinished ↓</button>
+    </div>
+    <div id="lines" class="lines"></div>
+  </main>
+</div>
+
+<dialog id="glossary-dialog">
+  <form method="dialog" class="dialog-head">
+    <h3>Glossary</h3>
+    <button class="ghost" value="close">Close</button>
+  </form>
+  <p class="hint">Terms found in a line show up under it. Click one to insert its translation.</p>
+  <table class="glossary-table">
+    <thead><tr><th>English</th><th>Translation</th><th>Note</th><th></th></tr></thead>
+    <tbody id="glossary-body"></tbody>
+  </table>
+  <div class="dialog-actions">
+    <button id="glossary-add" class="ghost">+ Add term</button>
+    <button id="glossary-save" class="primary">Save glossary</button>
+  </div>
+</dialog>
+
+<dialog id="help-dialog">
+  <form method="dialog" class="dialog-head">
+    <h3>Keyboard shortcuts</h3>
+    <button class="ghost" value="close">Close</button>
+  </form>
+  <table class="keys">
+    <tr><td><kbd>Ctrl</kbd> + <kbd>Enter</kbd></td><td>Save, mark done, go to next line</td></tr>
+    <tr><td><kbd>Alt</kbd> + <kbd>↓</kbd> / <kbd>↑</kbd></td><td>Next / previous line</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>Save this line</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd></td><td>Copy the English into the box</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Undo unsaved changes in this line</td></tr>
+  </table>
+  <p class="hint">Lines save automatically when you leave the box. Tags like <code>[panel=1]</code> must stay exactly as in the English; a warning appears if they don't match.</p>
+</dialog>
+
+<dialog id="apply-dialog">
+  <form method="dialog" class="dialog-head">
+    <h3 id="apply-title">Apply</h3>
+    <button class="ghost" value="close">Close</button>
+  </form>
+  <pre id="apply-output" class="apply-output"></pre>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>

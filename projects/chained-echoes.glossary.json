@@ -1,0 +1,15 @@
+[
+  { "source": "Band of the Iron Bull", "target": "Pasukan Banteng Besi", "note": "Glenn's mercenary band" },
+  { "source": "Band of the White Dragon", "target": "Pasukan Naga Putih", "note": "" },
+  { "source": "Adventurers Guild", "target": "Serikat Petualang", "note": "" },
+  { "source": "Flower Fields of Perpetua", "target": "Padang Bunga Perpetua", "note": "" },
+  { "source": "Grand Grimoire", "target": "Grimoire Agung", "note": "" },
+  { "source": "Opus Stone", "target": "Batu Opus", "note": "" },
+  { "source": "sky armor", "target": "Sky Armor", "note": "Keep in English (game term)" },
+  { "source": "grimoire", "target": "grimoire", "note": "Keep in English" },
+  { "source": "Echo", "target": "Echo", "note": "Keep in English" },
+  { "source": "Princess", "target": "Tuan Putri", "note": "Lenne, when addressed" },
+  { "source": "Prince", "target": "Pangeran", "note": "Frederik" },
+  { "source": "General", "target": "Jenderal", "note": "" },
+  { "source": "Ser", "target": "Ser", "note": "Knight title, keep" }
+]

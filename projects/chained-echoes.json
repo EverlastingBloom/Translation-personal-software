@@ -1,0 +1,25 @@
+{
+  "name": "Chained Echoes → Indonesian",
+  "csv": "../../translation/dialogue.csv",
+  "glossary": "chained-echoes.glossary.json",
+  "columns": {
+    "group": "database",
+    "subgroup": "conversation_title",
+    "subgroup_id": "conversation_id",
+    "speaker": "speaker",
+    "source": "english",
+    "reference": "german_reference",
+    "target": "indonesian",
+    "status": "review",
+    "labels": { "reference": "German", "target": "Indonesian" }
+  },
+  "group_order": ["Prologue", "Main", "Mainquest Act I", "Mainquest Act II", "Mainquest Act III",
+                  "Mainquest Act IV", "Sidequest", "NPC", "Others", "Mainquest DLC", "NPC DLC"],
+  "tag_pattern": "\\[[^\\]]*\\]|\\\\[.,^<>|]",
+  "apply": {
+    "label": "Apply to game",
+    "cwd": ".",
+    "command": ["../../translation/tools/.venv/Scripts/python.exe", "-I",
+                "../adapters/chained_echoes/import_translation.py", "--game", "../.."]
+  }
+}
