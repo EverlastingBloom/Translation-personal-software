@@ -120,16 +120,18 @@ exporter that pulls all dialogue out of the game into a CSV, and an importer beh
 (French by default, English is never touched). Expected layout:
 
 ```
-Chained Echoes/                     <- the game folder
-├── translation/
-│   ├── dialogue.csv                <- made by adapters/chained_echoes/export_dialogue.py
-│   └── tools/.venv/                <- Python environment with UnityPy
-└── Translation-personal-software/  <- this repo
+Chained Echoes/                         <- the game folder
+└── translation/                        <- everything for the translation, in one place
+    ├── dialogue.csv                    <- made by adapters/chained_echoes/export_dialogue.py
+    ├── backup_original/                <- untouched game files the importer starts from
+    ├── tools/.venv/                    <- Python environment with UnityPy
+    └── Translation-personal-software/  <- this repo
 ```
 
 Setup: `python -m venv tools\.venv`, `tools\.venv\Scripts\pip install UnityPy`, then
-`tools\.venv\Scripts\python ..\Translation-personal-software\adapters\chained_echoes\export_dialogue.py --game .. --out .`
-from inside `translation/`. In the game, pick *Français*.
+`tools\.venv\Scripts\python Translation-personal-software\adapters\chained_echoes\export_dialogue.py --game .. --out . --backup backup_original`
+from inside `translation/`. Both adapter scripts take `--backup` (default `<game>/_backup_original`).
+In the game, pick *Français*.
 
 ## Files
 

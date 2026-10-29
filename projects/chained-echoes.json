@@ -1,6 +1,6 @@
 {
   "name": "Chained Echoes → Indonesian",
-  "csv": "../../translation/dialogue.csv",
+  "csv": "../../dialogue.csv",
   "glossary": "chained-echoes.glossary.json",
   "columns": {
     "group": "database",
@@ -19,7 +19,8 @@
   "apply": {
     "label": "Apply to game",
     "cwd": ".",
-    "command": ["../../translation/tools/.venv/Scripts/python.exe", "-I",
-                "../adapters/chained_echoes/import_translation.py", "--game", "../.."]
+    "command": ["../../tools/.venv/Scripts/python.exe", "-I",
+                "../adapters/chained_echoes/import_translation.py", "--game", "../../..",
+                "--backup", "../../backup_original"]
   }
 }

@@ -5,7 +5,7 @@ Usage:  python import_translation.py --game "D:/GOG/Chained Echoes" [--csv-dir D
 The game has no slot for new languages, so the translation replaces an existing one
 (default: French). English is never touched. Pick that language in the game's options.
 
-On first run the original files are copied to <game>/_backup_original. Every run starts from
+On first run the original files are copied to <game>/_backup_original (or --backup). Every run starts from
 those originals, so it can be repeated as often as you like. Restore the backup to undo.
 Untranslated lines show English; pass --keep-original to leave the slot's own text instead.
 Requires: pip install UnityPy
@@ -56,6 +56,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--game", required=True, help="Chained Echoes install folder")
     ap.add_argument("--csv-dir", help="folder with dialogue.csv and speaker_names.csv (default: <game>/translation)")
+    ap.add_argument("--backup", help="folder holding the original game files (default: <game>/_backup_original)")
     ap.add_argument("--column", default="indonesian", help="CSV column holding the translation")
     ap.add_argument("--slot", default="fr", choices=sorted(SLOTS), help="language slot to replace")
     ap.add_argument("--keep-original", "--keep-french", action="store_true",
@@ -64,7 +65,7 @@ def main():
 
     game = os.path.abspath(args.game)
     csv_dir = args.csv_dir or os.path.join(game, "translation")
-    backup = os.path.join(game, "_backup_original")
+    backup = os.path.abspath(args.backup) if args.backup else os.path.join(game, "_backup_original")
     aa = os.path.join(game, "Chained Echoes_Data", "StreamingAssets", "aa")
     bundle_dir = os.path.join(aa, "StandaloneWindows64")
     ensure_backup(backup, bundle_dir, aa)

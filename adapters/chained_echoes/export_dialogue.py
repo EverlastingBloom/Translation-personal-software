@@ -2,7 +2,7 @@
 
 Usage:  python export_dialogue.py --game "D:/GOG/Chained Echoes" --out "D:/GOG/Chained Echoes/translation"
 
-Reads the ORIGINAL dialogue bundles from <game>/_backup_original if they are there (so a game
+Reads the ORIGINAL dialogue bundles from <game>/_backup_original (or --backup) if they are there (so a game
 that already has a translation applied still exports the shipped text), otherwise from the game.
 Requires: pip install UnityPy
 """
@@ -30,6 +30,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--game", required=True, help="Chained Echoes install folder")
     ap.add_argument("--out", required=True, help="folder to write dialogue.csv and speaker_names.csv into")
+    ap.add_argument("--backup", help="folder holding the original game files (default: <game>/_backup_original)")
     ap.add_argument("--target-column", default="indonesian", help="name of the empty translation column")
     ap.add_argument("--force", action="store_true", help="overwrite existing CSV files")
     args = ap.parse_args()
@@ -37,7 +38,7 @@ def main():
     out_csv = os.path.join(args.out, "dialogue.csv")
     if os.path.exists(out_csv) and not args.force:
         sys.exit(f"{out_csv} already exists. Use --force to overwrite it (your translations in it would be lost).")
-    backup = os.path.join(args.game, "_backup_original")
+    backup = args.backup or os.path.join(args.game, "_backup_original")
     live = os.path.join(args.game, "Chained Echoes_Data", "StreamingAssets", "aa", "StandaloneWindows64")
     dbs = {}
     for name in BUNDLES:
