@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Team Translation</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="csv.js"></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+
+<!-- ======================= sign in ======================= -->
+<section id="login" class="login" hidden>
+  <form id="login-form" class="card login-card">
+    <div class="login-logo" aria-hidden="true">文A</div>
+    <h1>Team Translation</h1>
+    <p id="login-hint" class="muted">Sign in with the email the admin invited.</p>
+    <label>Email <input id="login-email" type="email" autocomplete="username" required></label>
+    <label id="login-pass-wrap">Password
+      <input id="login-pass" type="password" autocomplete="current-password" minlength="8" required></label>
+    <button id="login-submit" class="primary" type="submit">Sign in</button>
+    <p class="login-links small">
+      <a href="#" id="login-toggle">First time here? Create your password</a>
+      <a href="#" id="login-forgot">Forgot password?</a>
+    </p>
+    <p id="login-msg" class="msg" role="status"></p>
+  </form>
+  <form id="newpass-form" class="card login-card" hidden>
+    <h1>Choose a new password</h1>
+    <label>New password <input id="newpass" type="password" autocomplete="new-password" minlength="8" required></label>
+    <button class="primary" type="submit">Save password</button>
+    <p id="newpass-msg" class="msg" role="status"></p>
+  </form>
+</section>
+
+<!-- ======================= no access ======================= -->
+<section id="noaccess" class="login" hidden>
+  <div class="card login-card">
+    <h1>No access</h1>
+    <p class="muted">This account isn't on the team (any more). Ask the admin to invite you.</p>
+    <button id="noaccess-out" class="primary" type="button">Sign out</button>
+  </div>
+</section>
+
+<!-- ======================= translating ======================= -->
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">文A</span>
+      <span class="brand-text">
+        <select id="project-select" class="project-select" aria-label="Project"></select>
+        <span id="progress-text" class="muted small"></span>
+      </span>
+    </div>
+    <div class="progress" id="progress" title="Approved / waiting for review / untranslated">
+      <span class="bar done"></span><span class="bar review"></span>
+    </div>
+    <div class="tools">
+      <input id="search" type="search" placeholder="Search text, translation, speaker or key…" autocomplete="off">
+      <select id="filter" aria-label="Show lines">
+        <option value="">All lines</option>
+        <option value="todo">To do (not approved)</option>
+        <option value="review">Waiting for review</option>
+        <option value="untranslated">Untranslated</option>
+        <option value="done">Approved</option>
+      </select>
+      <button id="admin-btn" class="ghost" type="button" hidden>Admin</button>
+      <span id="me" class="me"></span>
+      <button id="logout" class="ghost" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <label class="side-label" for="group-select">Section</label>
+      <select id="group-select"></select>
+      <div id="group-stats" class="group-stats small"></div>
+      <button id="review-all" class="ghost small review-all" type="button">⚑ Everything waiting for review</button>
+      <input id="scene-filter" type="search" placeholder="Filter scenes…" autocomplete="off">
+      <nav id="scenes" class="scenes" aria-label="Scenes"></nav>
+    </aside>
+    <main class="content">
+      <div class="content-head">
+        <div>
+          <div id="crumb" class="muted small"></div>
+          <h2 id="title">Pick a scene on the left</h2>
+        </div>
+        <button id="claim-btn" class="ghost" type="button" hidden></button>
+      </div>
+      <div id="lines" class="lines"></div>
+    </main>
+  </div>
+</div>
+
+<!-- ======================= admin ======================= -->
+<dialog id="admin" class="wide">
+  <div class="dialog-head">
+    <h3>Admin</h3>
+    <button class="ghost" type="button" data-close>Close</button>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab active" data-tab="team">Team</button>
+    <button type="button" class="tab" data-tab="projects">Projects</button>
+    <button type="button" class="tab" data-tab="people">Who did what</button>
+  </nav>
+
+  <section class="tab-panel" data-panel="team">
+    <form id="invite-form" class="invite-form">
+      <input id="invite-email" type="email" placeholder="friend@example.com" required>
+      <input id="invite-name" placeholder="Name the team sees" required>
+      <label class="check"><input id="invite-review" type="checkbox" checked> can approve</label>
+      <button class="primary" type="submit">Invite</button>
+    </form>
+    <p class="hint">An invited friend opens this site, presses <b>First time here? Create your password</b> and uses
+      exactly this email. Nobody else can create an account.</p>
+    <div class="table-wrap"><table class="table" id="team-table"></table></div>
+  </section>
+
+  <section class="tab-panel" data-panel="projects" hidden>
+    <div id="project-admin"></div>
+    <details class="import" id="import-box">
+      <summary>Import a game file</summary>
+      <p class="hint">Pick the CSV. If it comes from the desktop editor, also pick its <code>.translation.json</code>
+        (column setup) and <code>.notes.json</code> (names, review flags, notes) – they come along.</p>
+      <div class="import-grid">
+        <label>CSV / TSV file <input id="imp-csv" type="file" accept=".csv,.tsv,.txt"></label>
+        <label><span>.translation.json <span class="muted">(optional)</span></span>
+          <input id="imp-cfg" type="file" accept=".json"></label>
+        <label><span>.notes.json <span class="muted">(optional)</span></span>
+          <input id="imp-notes" type="file" accept=".json"></label>
+      </div>
+      <div id="imp-map" class="import-grid" hidden>
+        <label>Project name <input id="imp-name"></label>
+        <label>Translating into <input id="imp-label" placeholder="Indonesian"></label>
+        <label>Text to translate <select id="imp-source"></select></label>
+        <label>Translation column <select id="imp-target"></select></label>
+        <label>Key / ID <select id="imp-key"></select></label>
+        <label>Section <select id="imp-group"></select></label>
+        <label>Scene <select id="imp-scene"></select></label>
+        <label>Speaker <select id="imp-speaker"></select></label>
+        <label>Reference to show <select id="imp-reference"></select></label>
+        <label class="span2">Codes that must not change (regular expression)
+          <input id="imp-tags" placeholder="\{[^}]*\}|\[[^\]]*\]"></label>
+      </div>
+      <p class="hint" id="imp-info"></p>
+      <div class="dialog-actions">
+        <span id="imp-msg" class="msg"></span>
+        <button id="imp-go" class="primary" type="button" disabled>Import</button>
+      </div>
+    </details>
+  </section>
+
+  <section class="tab-panel" data-panel="people" hidden>
+    <p class="hint">Per person, in the open project. "Not used" = turned down, or replaced by a newer approved version.</p>
+    <div class="table-wrap"><table class="table" id="people-table"></table></div>
+  </section>
+</dialog>
+
+<div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

@@ -173,7 +173,7 @@ class Project:
             if self.repo:
                 found = gitsync.load_conflicts(self.repo, gitsync.rel(self.repo, self.csv_path))
                 self.conflicts = {i: c for i, c in found.items() if i < len(self.rows)}
-            self.csv_mtime = os.path.getmtime(self.csv_path)
+            self.disk_stamp = self.stamp_files()
             replayed = self.replay_journal()
             self.build_index()
             if replayed:
@@ -294,11 +294,20 @@ class Project:
         if self.output and self.output.get("path"):
             self.output_dirty = True
 
+    def stamp_files(self):
+        """When the CSV, notes and claims were last changed. Flags, names and notes live in the
+        notes file, so a Pull that only brings those must be noticed too."""
+        out = []
+        for path in (self.csv_path, self.meta_path, self.claims_path):
+            try:
+                out.append(os.path.getmtime(path))
+            except OSError:
+                out.append(None)
+        return out
+
     def external_change(self):
-        try:
-            return os.path.getmtime(self.csv_path) != self.csv_mtime
-        except OSError:
-            return False
+        stamp = self.stamp_files()
+        return stamp[0] is not None and stamp != self.disk_stamp
 
     def reload_from_disk(self):
         """Someone else (a script, OneDrive, a teammate) changed the CSV: take their version.
@@ -312,10 +321,10 @@ class Project:
             self.reload_from_disk()
         # only rows that changed are rewritten: small, clean diffs for git
         write_atomic(self.csv_path, self.table.dump(self.csv_fields(), self.rows))
-        self.csv_mtime = os.path.getmtime(self.csv_path)
         if self.meta or os.path.exists(self.meta_path):
             notes = gitsync.dump_json({str(k): v for k, v in self.meta.items()}, self.meta_path)
             write_atomic(self.meta_path, notes)
+        self.disk_stamp = self.stamp_files()
         try:
             os.remove(self.journal_path)
         except FileNotFoundError:
@@ -420,12 +429,15 @@ class Project:
     def claim(self, group, scene, user, on):
         """"I'm translating this scene" - so teammates pick another one. Shared with the team via git."""
         with self.lock:
+            if self.dirty_since is None and self.external_change():
+                self.reload_from_disk()  # don't write over claims a Pull just brought
             key = self.claim_key(group, scene)
             if on:
                 self.claims[key] = {"name": user, "at": time.time()}
             else:
                 self.claims.pop(key, None)
             write_atomic(self.claims_path, gitsync.dump_json(self.claims, self.claims_path))
+            self.disk_stamp[2] = os.path.getmtime(self.claims_path)
             self.version += 1
             return {"claimed": self.claims.get(key)}
 
