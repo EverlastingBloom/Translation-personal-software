@@ -24,7 +24,7 @@
       <button id="open-btn" class="open-card" type="button" hidden>
         <span class="drop-icon" aria-hidden="true">📂</span>
         <strong>Open a file…</strong>
-        <span class="muted">Recommended: Save then writes straight back next to it (or into it)</span>
+        <span class="muted">Recommended: your translation is saved straight into that file</span>
       </button>
       <label id="dropzone" class="dropzone" tabindex="0">
         <input id="file-input" type="file" accept=".csv,.tsv,.txt,.json" hidden>
@@ -133,20 +133,14 @@
     <label id="tag-custom-wrap" class="span2" hidden>Custom pattern (regular expression)
       <input id="tag-custom" placeholder="\{[^}]*\}">
     </label>
-    <fieldset id="setup-save" class="span2 save-choice">
-      <legend>Where should the translation be saved?</legend>
-      <label class="radio"><input type="radio" name="save-to" value="next" checked>
-        <span>Next to the original, as <code id="save-next-name"></code> <span class="muted">(recommended)</span></span></label>
-      <label class="radio"><input type="radio" name="save-to" value="original">
-        <span>Into the original file <code id="save-original-name" class="small"></code>
-          <span id="save-original-warn" class="warn small">– its texts get replaced by your translation</span></span></label>
-      <label id="save-inplace" class="radio"><input type="radio" name="save-to" value="inplace">
-        <span>Work on this file itself – <b>for a team sharing it on GitHub</b>
-          <span class="muted small">(the translation goes into this CSV, and <code id="save-inplace-name"></code> is
-          added next to it so teammates who download the folder can open it right away)</span></span></label>
-      <label class="radio"><input type="radio" name="save-to" value="later"> <span>Decide later</span></label>
-      <span class="hint">The file is kept up to date automatically while you translate – no exporting.</span>
-    </fieldset>
+    <div id="setup-save" class="span2 save-choice">
+      <strong>Saves into the original file</strong> <code id="save-original-name" class="small"></code>
+      <span id="save-original-warn" class="warn small">– its texts get replaced by your translation</span>
+      <span id="save-inplace" class="hint">Every change is written into this file a moment after you make it, and
+        the editor reads it again when it changes – so after a Pull, just open the project from <b>Your projects</b>.
+        <code id="save-inplace-name"></code> is added next to it so teammates who download the folder can open it right away.</span>
+      <span id="save-json-hint" class="hint">The file is kept up to date automatically while you translate – no exporting.</span>
+    </div>
     <p id="setup-save-dropped" class="hint span2">Dropped files don't tell the editor where they came from, so the
       first time you press <b>Save</b> you pick where the translation goes. After that Save updates that same file.
       (Use <b>Open a file…</b> on the start screen to skip this.)</p>

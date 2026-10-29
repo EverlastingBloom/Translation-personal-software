@@ -299,9 +299,40 @@ async function showStart() {
         foot.append(here);
       }
       card.append(meta, foot);
+      if (p.old_copy && res.owner) {
+        const old = el("span", "old-copy small");
+        const sw = el("span", "link-btn", `Use ${p.old_copy} itself`);
+        sw.setAttribute("role", "button");
+        sw.tabIndex = 0;
+        const go = (e) => { e.stopPropagation(); e.preventDefault(); convertProject(p); };
+        sw.addEventListener("click", go);
+        sw.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") go(e); });
+        old.append("⚠ Old copy – it doesn't see changes from a Pull. ", sw);
+        card.append(old);
+      }
       card.addEventListener("click", () => openProject(p.id));
     }
     list.append(card);
+  }
+}
+
+/** An older project (its own copy, written into a file): edit that file directly from now on. */
+async function convertProject(p) {
+  if (!confirm(`Switch “${p.name}” to work on ${p.old_copy} itself?\n\n` +
+    `The file's text is kept (with your teammates' pulled lines). Lines, review flags and notes that only ` +
+    `this copy has are added to it. The copy is moved to workspace/.old.`)) return;
+  try {
+    const r = await api("/api/convert", { id: p.id }, { noProject: true });
+    const bits = [];
+    if (r.lines) bits.push(`${r.lines} unsaved line${r.lines === 1 ? "" : "s"} added`);
+    if (r.flags) bits.push(`${r.flags} review flag${r.flags === 1 ? "" : "s"}`);
+    if (r.notes) bits.push(`${r.notes} note${r.notes === 1 ? "" : "s"}`);
+    if (r.theirs) bits.push(`${r.theirs} line${r.theirs === 1 ? "" : "s"} changed in the file kept as they are`);
+    toast(`Now working on ${r.file}` + (bits.length ? ` · ${bits.join(" · ")}` : ""));
+    await openProject(r.id);
+  } catch (err) {
+    toast(err.message, true);
+    showStart();
   }
 }
 
@@ -391,25 +422,14 @@ function showSetup() {
   $("#setup-save").hidden = !d.origin;
   $("#setup-save-dropped").hidden = !!d.origin;
   if (d.origin) {
-    document.querySelector("input[name=save-to][value=next]").checked = true;
     $("#save-original-name").textContent = d.origin;
     $("#save-original-warn").hidden = d.format === "csv";
     $("#save-inplace").hidden = d.format !== "csv";
+    $("#save-json-hint").hidden = d.format === "csv";
     $("#save-inplace-name").textContent = d.filename.replace(/\.[^.]+$/, "") + ".translation.json";
-    updateSetupSaveName();
   }
   renderPreview();
   $("#setup-dialog").showModal();
-}
-
-/** "dialogue.csv" + "Indonesian" -> "dialogue.indonesian.csv", like the server names it. */
-function updateSetupSaveName() {
-  if (!draft?.origin) return;
-  const label = ($("#setup-label").value.trim() || "translated").replace(/[^\p{L}\p{N}_-]+/gu, "-")
-    .replace(/^-+|-+$/g, "").toLowerCase() || "translated";
-  const stem = draft.filename.replace(/\.[^.]+$/, "");
-  const ext = draft.format === "csv" ? (draft.filename.toLowerCase().endsWith(".tsv") ? ".tsv" : ".csv") : ".json";
-  $("#save-next-name").textContent = `${stem}.${label}${ext}`;
 }
 
 function renderPreview() {
@@ -450,7 +470,6 @@ async function createProject() {
     const wanted = label ? label.toLowerCase() : "translation";
     target = [wanted, "translation", "translation_new"].find((n) => !draft.fields.includes(n)) || wanted + "_new";
   }
-  const saveTo = document.querySelector("input[name=save-to]:checked")?.value;
   const body = {
     draft: draft.draft,
     name: $("#setup-name").value,
@@ -465,7 +484,7 @@ async function createProject() {
       subgroup: $("#map-subgroup").value,
       reference: $("#map-reference").value,
     },
-    save_to: draft.origin && saveTo !== "later" ? { choice: saveTo, auto: true } : null,
+    save_to: draft.origin ? { choice: "original", auto: true } : null,
   };
   const btn = $("#setup-create");
   btn.disabled = true;
@@ -1497,19 +1516,22 @@ async function openSaveDialog() {
     for (const sug of s.suggest || []) {
       const label = el("label", "radio");
       const r = Object.assign(el("input"), { type: "radio", name: "save-choice", value: sug.path });
-      if (sug.path === current || (!current && sug.id === "next")) { r.checked = true; matched = true; }
+      if (sug.path === current || !current) { r.checked = true; matched = true; }
       const text = el("span");
       text.append(sug.label, el("br"), el("code", "small", sug.path));
       label.append(r, text);
       opts.append(label);
     }
+    const free = !matched;  // no original file known (a dropped file), or an older project saving elsewhere
     const label = el("label", "radio");
     const r = Object.assign(el("input"), { type: "radio", name: "save-choice", value: "custom" });
-    r.checked = !matched;
+    r.checked = free;
+    label.hidden = !free;
     const text = el("span", "grow");
-    text.append((s.suggest || []).length ? "Somewhere else:" : "File:");
+    text.append("File:");
     label.append(r, text);
     opts.append(label);
+    $("#save-path").closest(".save-path-row")?.toggleAttribute("hidden", !free);
     $("#save-path").value = matched ? "" : current;
     $("#save-path").placeholder = "C:\\…\\" + (s.export_name || "translation.csv");
     $("#save-browse").hidden = !summary.can_pick;
@@ -1647,7 +1669,10 @@ function init() {
   $("#save-state").addEventListener("click", openSaveDialog);
   $("#save-apply").addEventListener("click", () => chooseOutput(false));
   $("#save-browse").addEventListener("click", () => chooseOutput(true));
-  $("#save-path").addEventListener("focus", () => { document.querySelector("input[name=save-choice][value=custom]").checked = true; });
+  $("#save-path").addEventListener("focus", () => {
+    const custom = document.querySelector("input[name=save-choice][value=custom]");
+    if (custom) custom.checked = true;
+  });
   document.querySelectorAll("input[name=fallback]").forEach((r) => r.addEventListener("change", updateExportLink));
   $("#merge-btn").addEventListener("click", openMerge);
   $("#sync-btn").addEventListener("click", syncNow);
@@ -1670,7 +1695,6 @@ function init() {
   $("#setup-create").addEventListener("click", createProject);
   $("#setup-cancel").addEventListener("click", cancelSetup);
   $("#setup-dialog").addEventListener("cancel", (e) => { e.preventDefault(); cancelSetup(); });
-  $("#setup-label").addEventListener("input", updateSetupSaveName);
   for (const id of ["#map-source", "#map-target"]) $(id).addEventListener("change", renderPreview);
   $("#tag-preset").addEventListener("change", () => { $("#tag-custom-wrap").hidden = $("#tag-preset").value !== "custom"; });
   document.addEventListener("keydown", (e) => {

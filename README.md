@@ -50,16 +50,18 @@ time. Click the logo in the top-left corner to get back to that list.
 - Light and dark mode, works on small screens too. Long scenes load as you scroll, so even
   files with tens of thousands of lines stay quick.
 
-### Saving: pick the file once, then just Save
+### Saving: straight into the file you opened
 
-The first time (on the setup screen, or with the **Save** button) you choose where the
-translation goes – after that the editor is linked to that file and keeps it up to date. No more
-exporting and replacing the old file.
+Open a file with **Open a file…** and the translation is saved **into that same file** – there is
+nothing to choose and nothing to export.
 
-- **Next to the original**, e.g. `dialogue.csv` → `dialogue.indonesian.csv` (recommended)
-- **Into the original file**: a CSV keeps all its columns and gets your translation column;
-  a JSON file gets its texts replaced by the translation
-- **Somewhere else**: type a path or press **Browse…**
+- **CSV/TSV**: the editor works on the file itself. Every change is written into it a moment after
+  you make it, and when the file changes on disk (a **Pull** in GitHub Desktop, a script, OneDrive)
+  the editor reads it again – so after a Pull just open the project from **Your projects**.
+  The CSV keeps exactly its columns (plus your translation column if it had none); "needs review"
+  flags, notes and who translated what go into `<name>.notes.json` next to it.
+- **JSON**: the file gets its texts replaced by the translation (the editor keeps the original
+  texts in its own copy).
 
 The file comes back in the original format:
 
@@ -71,7 +73,14 @@ The file comes back in the original format:
   Save, which also has **Download a copy** and lets you switch the file or turn off auto-updating.
 
 Files dropped on the page don't tell the editor where they came from, so for those you pick the
-place the first time you press Save. Use **Open a file…** to link it straight away.
+place the first time you press Save. Use **Open a file…** to skip that.
+
+**Older projects** (made before this version) keep their own copy and only *write* it into the
+file, so they don't see a Pull. Their card in **Your projects** says *Old copy* – press
+**Use <file> itself** on it. The file's text is kept (with your teammates' pulled lines), and
+lines, review flags and notes only the copy has are added to it; the copy is moved to
+`workspace/.old`. Until then such a copy refuses to write over a file that changed outside the
+editor, so a Pull is never undone by Save.
 
 ## Working together – with people anywhere in the world
 
@@ -100,8 +109,8 @@ What makes this comfortable:
    easiest with [GitHub Desktop](https://desktop.github.com/): *File → New repository* (or
    *Clone repository* if it already exists on GitHub).
 2. Start the editor, press **Open a file…** and pick the CSV inside that folder.
-3. On the setup screen choose **"Work on this file itself – for a team sharing it on GitHub"**.
-   The editor adds `<name>.translation.json` (the column setup) next to the CSV.
+3. Check the columns on the setup screen and press **Start translating**. The editor adds
+   `<name>.translation.json` (the column setup) next to the CSV.
 4. Press **⇅ Sync**. That uploads the setup; the first time a GitHub sign-in window may appear.
 5. Invite your translators on GitHub: the repository → *Settings → Collaborators → Add people*.
 
@@ -179,14 +188,8 @@ Pick the one that matches your game on the setup screen (it guesses for you):
 
 ## Where things are stored
 
-Opened and dropped files are copied into the `workspace/` folder next to the app, one folder per
-project (`original.*`, the working copy `lines.csv`, `project.json`, `glossary.json`, and
-`lines.notes.json` with notes and who translated what). Your original file is only changed if you
-choose *Into the original file*. To move a project to another computer, copy its folder into that
-computer's `workspace/`. To delete a project, delete its folder.
-
-Team projects (*Work on this file itself*) have no copy: the editor edits the CSV in the
-translation repo and keeps these next to it, all shared through git:
+A CSV/TSV you open has no copy: the editor edits the file itself and keeps these next to it
+(in a GitHub repository they are all shared through git):
 
 | File | What it is |
 |---|---|
@@ -196,6 +199,10 @@ translation repo and keeps these next to it, all shared through git:
 | `dialogue.claims.json` | Who is working on which scene |
 | `dialogue.glossary.json` | The shared glossary |
 | `.gitattributes` | Tells git to merge these files line by line (see `gitsync.py`) |
+
+JSON files and dropped files are copied into the `workspace/` folder next to the app, one folder
+per project (`original.*`, the working copy `lines.csv`, `project.json`, `glossary.json`,
+`lines.notes.json`). To delete such a project, delete its folder.
 
 Lines still to decide after a Sync are kept inside `.git/` (only on your computer).
 
