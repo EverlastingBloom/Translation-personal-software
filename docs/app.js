@@ -433,15 +433,16 @@ function renderVersion(l, v) {
 
   const actions = el("div", "version-actions");
   const own = isOwn(v);
+  const mayDecide = (me.can_review || me.is_admin) && (!own || me.is_admin); // the admin may approve their own
   if (v.status === "pending") {
     if (me.can_review || me.is_admin) {
       const ok = el("button", "small primary", "✓ Approve");
       ok.type = "button";
-      ok.disabled = own;
-      ok.title = own ? "You can't approve your own translation – someone else checks it." : "Make this the main translation";
+      ok.disabled = !mayDecide;
+      ok.title = mayDecide ? "Make this the main translation" : "You can't approve your own translation – someone else checks it.";
       ok.addEventListener("click", () => decide(l, v, "approve_version"));
       actions.append(ok);
-      if (!own) {
+      if (mayDecide) {
         const no = el("button", "small", "Not this one");
         no.type = "button";
         no.addEventListener("click", () => decide(l, v, "reject_version"));
@@ -454,7 +455,7 @@ function renderVersion(l, v) {
       w.addEventListener("click", () => withdraw(l, v));
       actions.append(w);
     }
-  } else if ((me.can_review || me.is_admin) && !own) {
+  } else if (mayDecide) {
     const ok = el("button", "small ghost", "Use this again");
     ok.type = "button";
     ok.addEventListener("click", () => decide(l, v, "approve_version"));
