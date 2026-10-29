@@ -140,8 +140,8 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
 
 - **Invite only.** The admin adds emails in the admin panel; nobody else can create an account.
 - **Nothing is overwritten.** Every translation is a *version* with its author and time. It waits
-  for review until someone **other than its author** approves it (people who "can approve", and the
-  admin). If two people translate the same line, both versions wait side by side; the approved one
+  for review until someone **other than its author** approves it (people who "can approve"). The
+  admin may approve anything, their own translations too. If two people translate the same line, both versions wait side by side; the approved one
   becomes the main translation, the rest stay in the line's history.
 - **Notes** are a small conversation on each line. **✋ Claim** tells the others you're on a scene
   (it doesn't lock it).
