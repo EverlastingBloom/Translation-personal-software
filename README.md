@@ -132,6 +132,41 @@ fine too: once the editor has opened the project on that computer, git uses its 
 merge, and if a pull ever stops with `<<<<<<<` conflict markers in the CSV, the editor finishes
 that merge itself the next time it opens the project.
 
+### Online: the team website (no installing, no git)
+
+The `docs/` folder is a website for translating together from anywhere: sign in with a password,
+translate in the browser, and see each other's work live. It runs on **GitHub Pages** (free) with
+**Supabase** (free) as the database.
+
+- **Invite only.** The admin adds emails in the admin panel; nobody else can create an account.
+- **Nothing is overwritten.** Every translation is a *version* with its author and time. It waits
+  for review until someone **other than its author** approves it (people who "can approve", and the
+  admin). If two people translate the same line, both versions wait side by side; the approved one
+  becomes the main translation, the rest stay in the line's history.
+- **Notes** are a small conversation on each line. **✋ Claim** tells the others you're on a scene
+  (it doesn't lock it).
+- **Admin panel:** invite or remove people, who can approve, import a game file (with the desktop
+  editor's `.translation.json` and `.notes.json`, so names, review flags and notes come along),
+  **export the game file** (only approved lines, or also the waiting ones), and who did what.
+  The exported CSV is byte-for-byte the original except the lines whose translation changed.
+
+Set up once (admin):
+
+1. In `docs/supabase/schema.sql`, put **your** email and name on the last line (marked *ADMIN*).
+   In Supabase: **SQL Editor → New query**, paste the whole file, **Run**.
+2. Supabase → **Authentication → URL Configuration**: set *Site URL* (and add it under *Redirect
+   URLs*) to `https://everlastingbloom.github.io/Translation-personal-software/`.
+3. Supabase → **Authentication → Sign In / Providers → Email**: keep *Allow new users to sign up*
+   and *Confirm email* **on** (the database itself refuses emails that weren't invited).
+4. GitHub → this repository → **Settings → Pages**: *Deploy from a branch*, branch `main`,
+   folder `/docs`, **Save**. After a minute the site is at the address above.
+5. Open the site → *First time here? Create your password* with your admin email → confirm the
+   email → sign in → **Admin → Projects → Import a game file**.
+6. **Admin → Team**: invite your translators and send them the link.
+
+`docs/config.js` holds the Supabase address and its *publishable* key – both are meant to be
+public. Never put the *secret / service_role* key in this repository.
+
 ### Same Wi-Fi: translate live in one editor
 
 Double-click **`START_SHARED.bat`** (or `python translator.py --share`). The window shows a link;
