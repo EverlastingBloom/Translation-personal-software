@@ -102,6 +102,19 @@ create table public.claims (
   primary key (project_id, grp, scene, user_id)
 );
 
+-- Direct messages between two people on the team. Only those two can read them.
+create table public.messages (
+  id          bigint generated always as identity primary key,
+  sender      uuid not null references public.profiles on delete cascade default auth.uid(),
+  sender_name text not null default '',
+  recipient   uuid not null references public.profiles on delete cascade,
+  body        text not null check (length(body) between 1 and 4000),
+  created_at  timestamptz not null default now(),
+  read_at     timestamptz
+);
+create index messages_recipient on public.messages (recipient, created_at);
+create index messages_sender on public.messages (sender, created_at);
+
 -- ---------------------------------------------------------------------------------------------
 -- Who is asking?
 create function public.is_member() returns boolean
@@ -160,6 +173,19 @@ end $$;
 create trigger stamp_claims before insert on public.claims
   for each row execute function public.stamp_claim();
 
+-- The sender and the time always come from the account, so nobody can write as someone else.
+create function public.stamp_message() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  new.sender := auth.uid();
+  new.sender_name := coalesce((select display_name from profiles where id = auth.uid()), '');
+  new.created_at := now();
+  new.read_at := null;
+  return new;
+end $$;
+create trigger stamp_messages before insert on public.messages
+  for each row execute function public.stamp_message();
+
 -- ---------------------------------------------------------------------------------------------
 -- The rules. Without an account on the team you can't read or change anything.
 alter table public.invites  enable row level security;
@@ -169,6 +195,7 @@ alter table public.lines    enable row level security;
 alter table public.versions enable row level security;
 alter table public.notes    enable row level security;
 alter table public.claims   enable row level security;
+alter table public.messages enable row level security;
 
 create policy "admin manages invites" on public.invites for all using (is_admin()) with check (is_admin());
 
@@ -197,6 +224,11 @@ create policy "delete own note" on public.notes for delete using (author = auth.
 create policy "team reads claims" on public.claims for select using (is_member());
 create policy "team claims" on public.claims for insert with check (is_member());
 create policy "unclaim own" on public.claims for delete using (user_id = auth.uid());
+
+create policy "read own messages" on public.messages for select
+  using (is_member() and auth.uid() in (sender, recipient));
+create policy "write to a teammate" on public.messages for insert
+  with check (is_member() and sender = auth.uid() and recipient <> auth.uid());
 
 -- ---------------------------------------------------------------------------------------------
 -- Approving: only reviewers and the admin. Reviewers never approve their own translation;
@@ -239,6 +271,12 @@ begin
   update versions set status = 'rejected', decided_by_name = me.display_name, decided_at = now() where id = v.id;
 end $$;
 
+-- Opening a conversation marks what that person sent me as read (nothing else can change).
+create function public.mark_read(p_from uuid) returns void
+language sql security definer set search_path = public as $$
+  update messages set read_at = now() where recipient = auth.uid() and sender = p_from and read_at is null
+$$;
+
 -- ---------------------------------------------------------------------------------------------
 -- Reading, for the pages. These run with the reader's own rights, so the rules above apply.
 
@@ -257,6 +295,21 @@ language sql stable as $$
   where l.project_id = p_project
   group by l.grp, l.scene
   order by min(l.idx)
+$$;
+
+-- Progress of every project at once, for the welcome page.
+create function public.project_progress()
+returns table (project_id bigint, total bigint, done bigint, review bigint, untranslated bigint)
+language sql stable as $$
+  with v as (
+    select line_id, bool_or(status = 'approved') as a, bool_or(status = 'pending') as p
+    from versions group by line_id)
+  select l.project_id, count(*),
+         count(*) filter (where v.a and not v.p),
+         count(*) filter (where v.p),
+         count(*) filter (where v.line_id is null or not (v.a or v.p))
+  from lines l left join v on v.line_id = l.id
+  group by l.project_id
 $$;
 
 -- Lines with their versions and notes: one scene, a search, a state, or given lines.
@@ -392,7 +445,7 @@ language sql stable as $$
 $$;
 
 -- Live updates on everyone's screen.
-alter publication supabase_realtime add table public.versions, public.notes, public.claims;
+alter publication supabase_realtime add table public.versions, public.notes, public.claims, public.messages;
 
 -- ---------------------------------------------------------------------------------------------
 -- ADMIN: your email (lower case) and the name the team sees. Change both, then press Run.

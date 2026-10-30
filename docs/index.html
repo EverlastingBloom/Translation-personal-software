@@ -49,30 +49,74 @@
 <div id="app" class="app" hidden>
   <header class="topbar">
     <div class="brand">
-      <span class="logo" aria-hidden="true">文A</span>
-      <span class="brand-text">
+      <button id="home-btn" class="logo" type="button" title="Home" aria-label="Home">文A</button>
+      <span class="brand-text for-project">
         <select id="project-select" class="project-select" aria-label="Project"></select>
         <span id="progress-text" class="muted small"></span>
       </span>
+      <strong class="brand-home">Team Translation</strong>
     </div>
-    <div class="progress" id="progress" title="Approved / waiting for review / untranslated">
+    <div class="progress for-project" id="progress" title="Approved / waiting for review / untranslated">
       <span class="bar done"></span><span class="bar review"></span>
     </div>
     <div class="tools">
-      <input id="search" type="search" placeholder="Search text, translation, speaker or key…" autocomplete="off">
-      <select id="filter" aria-label="Show lines">
+      <input id="search" class="for-lines" type="search" placeholder="Search text, translation, speaker or key…" autocomplete="off">
+      <select id="filter" class="for-lines" aria-label="Show lines">
         <option value="">All lines</option>
         <option value="todo">To do (not approved)</option>
         <option value="review">Waiting for review</option>
         <option value="untranslated">Untranslated</option>
         <option value="done">Approved</option>
       </select>
-      <button id="dash-btn" class="ghost" type="button" hidden>Dashboard</button>
+      <nav class="nav" aria-label="Pages">
+        <button class="ghost" type="button" data-go="home">Home</button>
+        <button class="ghost" type="button" data-go="translate">Translate</button>
+        <button class="ghost" type="button" data-go="inbox">Messages <span id="unread" class="badge" hidden></span></button>
+        <button id="dash-btn" class="ghost" type="button" data-go="dash" hidden>Dashboard</button>
+      </nav>
       <button id="admin-btn" class="ghost" type="button" hidden>Admin</button>
       <span id="me" class="me"></span>
       <button id="logout" class="ghost" type="button">Sign out</button>
     </div>
   </header>
+
+  <!-- ======================= welcome ======================= -->
+  <main id="home" class="home" hidden>
+    <div class="home-head">
+      <div id="home-date" class="muted small"></div>
+      <h2 id="home-hello">Welcome</h2>
+    </div>
+    <section id="home-overall" class="card home-overall" hidden></section>
+    <div id="home-projects" class="project-cards"></div>
+    <div id="home-tiles" class="tiles home-tiles"></div>
+    <section class="card dash-card">
+      <div class="card-head">
+        <h3>Messages</h3>
+        <button class="small" type="button" data-go="inbox">Open messages</button>
+      </div>
+      <div id="home-messages" class="home-messages"></div>
+    </section>
+  </main>
+
+  <!-- ======================= direct messages ======================= -->
+  <main id="inbox" class="inbox" hidden>
+    <aside class="card inbox-list">
+      <h3>Messages</h3>
+      <p class="hint">Only you and the person you write to can read a conversation.</p>
+      <nav id="people-list" class="people-list" aria-label="Conversations"></nav>
+    </aside>
+    <section class="card chat">
+      <div class="chat-head">
+        <button id="chat-back" class="ghost small" type="button" aria-label="Back to the list">←</button>
+        <h3 id="chat-with">Messages</h3>
+      </div>
+      <div id="chat-log" class="chat-log" aria-live="polite"></div>
+      <form id="chat-form" class="chat-form" hidden>
+        <textarea id="chat-input" rows="2" maxlength="4000" placeholder="Write a message… (Enter sends, Shift+Enter for a new line)"></textarea>
+        <button id="chat-send" class="primary" type="submit">Send</button>
+      </form>
+    </section>
+  </main>
 
   <div class="layout">
     <aside class="sidebar">

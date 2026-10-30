@@ -139,6 +139,11 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
 **Supabase** (free) as the database.
 
 - **Invite only.** The admin adds emails in the admin panel; nobody else can create an account.
+- **Welcome page.** After signing in you land on a home page: how far each project is (percentage
+  finished and a progress bar), the scenes you've claimed, what you wrote this week, what's waiting
+  for review, and your latest messages. **Continue translating** opens the project.
+- **Messages.** Write directly to anyone on the team. Only the two of you can read a conversation;
+  new messages pop up live, and the *Messages* button shows how many are unread.
 - **Nothing is overwritten.** Every translation is a *version* with its author and time. It waits
   for review until someone **other than its author** approves it (people who "can approve"). The
   admin may approve anything, their own translations too. If two people translate the same line, both versions wait side by side; the approved one
@@ -154,8 +159,10 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   commented how much (compared with the week before) and which scenes the work went into.
   **Copy weekly report** puts it on the clipboard as plain text for the team chat. Below that,
   each person's work week by week and their contributions so far.
-  A database set up before the dashboard existed needs `docs/supabase/update-2-dashboard.sql` run
-  once (Supabase → SQL Editor → New query → paste → Run).
+- **Updating an older database:** a database set up before a feature existed needs its update run
+  once, in order (Supabase → SQL Editor → New query → paste → Run):
+  `update-1-admin-approves-own.sql`, `update-2-dashboard.sql` (the dashboard), `update-3-welcome-messages.sql` (messages and the
+  welcome page's progress), all in `docs/supabase/`.
 
 Set up once (admin):
 

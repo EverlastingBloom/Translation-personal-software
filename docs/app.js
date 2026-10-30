@@ -48,6 +48,9 @@ function explain(err) {
   if (/weekly_activity|weekly_progress|week_scenes/i.test(m) && /function/i.test(m)) {
     return "The dashboard needs a database update: run docs/supabase/update-2-dashboard.sql in Supabase → SQL Editor.";
   }
+  if (/messages|mark_read/i.test(m) && /schema cache|does not exist|could not find/i.test(m)) {
+    return "Messages aren't set up yet: the admin runs docs/supabase/update-3-welcome-messages.sql in Supabase → SQL Editor.";
+  }
   return m;
 }
 
@@ -204,9 +207,38 @@ async function start() {
   $("#me").title = `${me.email}${me.is_admin ? " · admin" : me.can_review ? " · can approve" : ""}`;
   $("#admin-btn").hidden = !me.is_admin;
   $("#dash-btn").hidden = !me.is_admin;
-  showDash(false);
+  setView("home", false);
   showOnly("#app");
-  await loadProjects();
+  await Promise.all([loadProjects(), loadInbox()]);
+  subscribeInbox();
+  setView("home");
+}
+
+// ---------- pages: welcome, translating, dashboard, messages ----------
+const VIEWS = { home: "#home", translate: ".layout", dash: "#dash", inbox: "#inbox" };
+let current = null;       // the page on screen
+
+function setView(name, render = true) {
+  if ((name === "translate" || name === "dash") && !project) {
+    toast(me.is_admin ? "Import a game file first (Admin → Projects)." : "The admin hasn't added a game file yet.");
+    name = "home";
+  }
+  current = name;
+  for (const [k, sel] of Object.entries(VIEWS)) $(sel).hidden = k !== name;
+  $("#app").dataset.view = name;
+  for (const b of $$(".nav [data-go]")) b.classList.toggle("active", b.dataset.go === name);
+  document.title = name === "translate" || name === "dash" ? `${project.name} · Team Translation` : "Team Translation";
+  if (!render) return;
+  if (name === "home") renderHome().catch((err) => toast(explain(err), true));
+  if (name === "dash") loadDash().catch((err) => toast(explain(err), true));
+  if (name === "inbox") renderInbox();
+}
+
+/** Open a project (and maybe one scene) on the translating page. */
+async function goTranslate(p, grp, scene) {
+  if (p && project?.id !== p.id) await openProject(p);
+  setView("translate");
+  if (scene != null && project) await openScene(grp, scene);
 }
 
 // ---------- projects, scenes ----------
@@ -217,7 +249,7 @@ async function loadProjects() {
   for (const p of projects) sel.append(Object.assign(el("option", "", p.name), { value: p.id }));
   if (!projects.length) {
     project = null;
-    showDash(false);
+    if (current === "translate" || current === "dash") setView("home");
     $("#lines").textContent = "";
     $("#title").textContent = "No project yet";
     $("#crumb").textContent = "";
@@ -239,11 +271,11 @@ async function openProject(p) {
   project = p;
   $("#project-select").value = p.id;
   localSet("project", p.id);
-  document.title = `${p.name} · Team Translation`;
+  if (current === "translate" || current === "dash") document.title = `${p.name} · Team Translation`;
   drafts = {};
   subscribe();
   await loadStats();
-  if (!$("#dash").hidden) loadDash().catch((err) => toast(explain(err), true));
+  if (current === "dash") loadDash().catch((err) => toast(explain(err), true));
   const groups = [...new Set(stats.map((s) => s.grp))];
   const savedView = (() => { try { return JSON.parse(localGet("view." + p.id) || "null"); } catch { return null; } })();
   const first = savedView && stats.find((s) => s.grp === savedView.grp && s.scene === savedView.scene)
@@ -653,6 +685,348 @@ function subscribe() {
     .subscribe();
 }
 
+// ---------- welcome page ----------
+async function count(query) {
+  const { count: n, error } = await query;
+  if (error) throw error;
+  return n || 0;
+}
+
+function mondayISO() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d.toISOString();
+}
+
+/** Progress of every project: one call, or one per project on a database without update 3. */
+async function projectProgress() {
+  try {
+    return await must(sb.rpc("project_progress"));
+  } catch {
+    return Promise.all(projects.map(async (p) => ({ project_id: p.id, ...sum(await must(sb.rpc("scene_stats", { p_project: p.id }))) })));
+  }
+}
+
+function pctDone(c) { return c.total ? Math.floor(100 * c.done / c.total) : 0; }
+function isComplete(c) { return c.total > 0 && !c.untranslated && !c.review; }
+
+function progressBar(c, label) {
+  const bar = el("div", "progress big");
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", "100");
+  bar.setAttribute("aria-valuenow", String(pctDone(c)));
+  bar.setAttribute("aria-label", label);
+  const done = el("span", "bar done"), review = el("span", "bar review");
+  done.style.width = c.total ? `${100 * c.done / c.total}%` : "0";
+  review.style.width = c.total ? `${100 * c.review / c.total}%` : "0";
+  bar.append(done, review);
+  return bar;
+}
+
+function progressLegend(c) {
+  const lg = el("div", "legend small");
+  for (const [cls, n, text] of [["done", c.done, "approved"], ["review", c.review, "waiting for review"], ["todo", c.untranslated, "untranslated"]]) {
+    const s = el("span");
+    s.append(el("i", `sw ${cls}`), `${fmt(n)} ${text}`);
+    lg.append(s);
+  }
+  return lg;
+}
+
+function bigPercent(c) {
+  const box = el("div", "big-pct");
+  box.append(el("span", "big-pct-value", isComplete(c) ? "✓ 100%" : `${pctDone(c)}%`), el("span", "muted", isComplete(c) ? "complete" : "finished"));
+  return box;
+}
+
+async function renderHome() {
+  const h = new Date().getHours();
+  $("#home-hello").textContent = `${h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"}, ${me.display_name}`;
+  $("#home-date").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  renderHomeMessages();
+  const cards = $("#home-projects");
+  if (!projects.length) {
+    $("#home-overall").hidden = true;
+    $("#home-tiles").textContent = "";
+    cards.textContent = "";
+    const empty = el("section", "card project-card");
+    empty.append(el("h3", "", "No project yet"), el("p", "hint", me.is_admin
+      ? "Open Admin → Projects → Import a game file to start."
+      : "The admin hasn't added a game file yet. You can already write to the team under Messages."));
+    cards.append(empty);
+    return;
+  }
+  const reviewer = me.can_review || me.is_admin;
+  const [prog, myClaims, waiting, toReview, thisWeek] = await Promise.all([
+    projectProgress(),
+    must(sb.from("claims").select("*").eq("user_id", me.id)),
+    count(sb.from("versions").select("id", { count: "exact", head: true }).eq("author", me.id).eq("status", "pending")),
+    reviewer ? count(sb.from("versions").select("id", { count: "exact", head: true }).eq("status", "pending")
+      .or(`author.is.null,author.neq.${me.id}`)) : Promise.resolve(null),
+    count(sb.from("versions").select("id", { count: "exact", head: true }).eq("author", me.id).gte("created_at", mondayISO())),
+  ]);
+  if (current !== "home") return;
+  const of = (p) => {
+    const r = prog.find((x) => Number(x.project_id) === p.id) || {};
+    return { total: Number(r.total || 0), done: Number(r.done || 0), review: Number(r.review || 0), untranslated: Number(r.untranslated || 0) };
+  };
+
+  // all projects together (only worth showing when there are several)
+  const overall = $("#home-overall");
+  overall.hidden = projects.length < 2;
+  overall.textContent = "";
+  if (projects.length > 1) {
+    const all = projects.map(of).reduce((t, c) => ({ total: t.total + c.total, done: t.done + c.done, review: t.review + c.review,
+                                                     untranslated: t.untranslated + c.untranslated }), { total: 0, done: 0, review: 0, untranslated: 0 });
+    const head = el("div", "pc-head");
+    head.append(el("h3", "", "All projects"), el("span", "muted small", `${fmt(all.total)} lines`));
+    overall.append(head, bigPercent(all), progressBar(all, "All projects finished"), progressLegend(all));
+  }
+
+  cards.textContent = "";
+  for (const p of projects) {
+    const c = of(p);
+    const card = el("section", "card project-card" + (project?.id === p.id ? " current" : ""));
+    const head = el("div", "pc-head");
+    head.append(el("h3", "", p.name), el("span", "muted small", `into ${p.target_label} · ${fmt(c.total)} lines`));
+    card.append(head, bigPercent(c), progressBar(c, `${p.name} finished`), progressLegend(c));
+    const claimsHere = myClaims.filter((x) => Number(x.project_id) === p.id);
+    if (claimsHere.length) {
+      const on = el("div", "pc-claims small");
+      on.append("✋ You're on ");
+      claimsHere.forEach((x, i) => {
+        const b = el("button", "link", x.scene || "(no scene)");
+        b.type = "button";
+        b.title = x.grp;
+        b.addEventListener("click", () => goTranslate(p, x.grp, x.scene));
+        on.append(i ? ", " : "", b);
+      });
+      card.append(on);
+    }
+    const actions = el("div", "pc-actions");
+    const go = el("button", "primary", isComplete(c) ? "Open" : project?.id === p.id ? "Continue translating" : "Start translating");
+    go.type = "button";
+    go.addEventListener("click", () => goTranslate(p));
+    actions.append(go);
+    if (c.review && reviewer) {
+      const rv = el("button", "", `⚑ Review (${fmt(c.review)})`);
+      rv.type = "button";
+      rv.addEventListener("click", async () => { await goTranslate(p); $("#review-all").click(); });
+      actions.append(rv);
+    }
+    card.append(actions);
+    cards.append(card);
+  }
+
+  const tiles = $("#home-tiles");
+  tiles.textContent = "";
+  tiles.append(
+    tile("You wrote this week", fmt(thisWeek), "translations since Monday"),
+    tile("Yours, waiting for review", fmt(waiting), waiting ? "someone else will check them" : "nothing waiting"),
+  );
+  if (toReview != null) {
+    tiles.append(clickable(tile("Waiting for your review", fmt(toReview), "translations by others · open the list"), async () => {
+      await goTranslate(project);
+      $("#review-all").click();
+    }));
+  }
+  const unread = unreadCount();
+  tiles.append(clickable(tile("Unread messages", dmReady ? fmt(unread) : "–",
+    dmReady ? (unread ? "open Messages to read them" : "you're all caught up") : "not set up yet"), () => setView("inbox")));
+}
+
+function clickable(box, action) {
+  box.classList.add("clickable");
+  box.tabIndex = 0;
+  box.setAttribute("role", "button");
+  box.addEventListener("click", action);
+  box.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); action(); } });
+  return box;
+}
+
+// ---------- direct messages ----------
+let team = [];            // everyone else on the team
+let inbox = [];           // my recent messages (sent and received), newest first
+let chatLog = [];         // the open conversation, oldest first
+let chatWith = null;      // profile id of the person in the open conversation
+let dmChannel = null;
+let dmReady = false;      // false: the messages couldn't be loaded (e.g. the database lacks update 3)
+let dmError = "";
+
+async function loadInbox() {
+  try {
+    [team, inbox] = await Promise.all([
+      must(sb.from("profiles").select("id, display_name, is_admin").neq("id", me.id).order("display_name")),
+      must(sb.from("messages").select("*").order("created_at", { ascending: false }).limit(500)),
+    ]);
+    dmReady = true;
+  } catch (err) {
+    dmReady = false;
+    dmError = explain(err);
+  }
+  renderUnread();
+}
+
+function unreadCount(from) {
+  return inbox.filter((m) => m.recipient === me.id && !m.read_at && (!from || m.sender === from)).length;
+}
+
+function renderUnread() {
+  const n = dmReady ? unreadCount() : 0;
+  $("#unread").textContent = n > 99 ? "99+" : String(n);
+  $("#unread").hidden = !n;
+}
+
+/** Everyone on the team, the ones I talked to most recently first. */
+function conversations() {
+  return team.map((p) => ({ p, last: inbox.find((m) => m.sender === p.id || m.recipient === p.id), unread: unreadCount(p.id) }))
+    .sort((a, b) => (b.last?.created_at || "").localeCompare(a.last?.created_at || "") || a.p.display_name.localeCompare(b.p.display_name));
+}
+
+function personButton({ p, last, unread }, onClick) {
+  const b = el("button", "person" + (p.id === chatWith ? " active" : "") + (unread ? " unread" : ""));
+  b.type = "button";
+  const top = el("span", "person-top");
+  top.append(el("span", "person-name", p.display_name));
+  if (unread) top.append(el("span", "badge", String(unread)));
+  else if (last) top.append(el("span", "muted small", timeAgo(last.created_at)));
+  b.append(top, el("span", "person-last small", last ? `${last.sender === me.id ? "You: " : ""}${last.body}` : "No messages yet"));
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function renderHomeMessages() {
+  const box = $("#home-messages");
+  box.textContent = "";
+  if (!dmReady) { box.append(el("p", "hint", dmError)); return; }
+  const recent = conversations().filter((c) => c.last).slice(0, 4);
+  if (!recent.length) {
+    box.append(el("p", "hint", team.length ? "No messages yet – open Messages to write to someone on the team." : "Nobody else is on the team yet."));
+    return;
+  }
+  for (const c of recent) box.append(personButton(c, () => { setView("inbox"); openChat(c.p.id); }));
+}
+
+function renderInbox() {
+  const list = $("#people-list");
+  list.textContent = "";
+  if (!dmReady) { list.append(el("p", "empty", dmError)); renderChat(); return; }
+  if (!team.length) list.append(el("p", "empty", "Nobody else is on the team yet."));
+  for (const c of conversations()) list.append(personButton(c, () => openChat(c.p.id)));
+  renderChat();
+}
+
+async function openChat(id) {
+  chatWith = id;
+  chatLog = [];
+  $("#inbox").classList.add("chatting");
+  renderInbox();
+  try {
+    const log = await must(sb.from("messages").select("*")
+      .or(`and(sender.eq.${me.id},recipient.eq.${id}),and(sender.eq.${id},recipient.eq.${me.id})`)
+      .order("created_at", { ascending: false }).limit(300));
+    if (chatWith !== id) return;
+    chatLog = log.reverse();
+    renderChat();
+    $("#chat-input").focus();
+    if (unreadCount(id)) {
+      await must(sb.rpc("mark_read", { p_from: id }));
+      markReadHere(id);
+    }
+  } catch (err) {
+    toast(explain(err), true);
+  }
+}
+
+function markReadHere(from) {
+  const now = new Date().toISOString();
+  for (const m of [...inbox, ...chatLog]) if (m.sender === from && m.recipient === me.id && !m.read_at) m.read_at = now;
+  renderUnread();
+  if (current === "inbox") renderInbox();
+  if (current === "home") renderHomeMessages();
+}
+
+function renderChat() {
+  const p = team.find((x) => x.id === chatWith);
+  $("#chat-with").textContent = p ? p.display_name : "Messages";
+  $("#chat-form").hidden = !p;
+  const log = $("#chat-log");
+  log.textContent = "";
+  if (!p) {
+    if (dmReady && team.length) log.append(el("p", "empty", "Pick someone to write to them."));
+    return;
+  }
+  if (!chatLog.length) log.append(el("p", "empty", `No messages with ${p.display_name} yet. Say hello!`));
+  const lastMine = chatLog.filter((m) => m.sender === me.id).pop();
+  let day = "";
+  for (const m of chatLog) {
+    const d = new Date(m.created_at).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    if (d !== day) { log.append(el("div", "chat-day muted small", d)); day = d; }
+    const mine = m.sender === me.id;
+    const row = el("div", "msg" + (mine ? " mine" : ""));
+    const meta = el("div", "msg-meta muted small",
+      new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) + (m === lastMine && m.read_at ? " · seen" : ""));
+    meta.title = new Date(m.created_at).toLocaleString();
+    row.append(el("div", "bubble", m.body), meta);
+    log.append(row);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendMessage(e) {
+  e.preventDefault();
+  const input = $("#chat-input");
+  const body = input.value.trim();
+  if (!body || !chatWith) return;
+  const btn = $("#chat-send");
+  btn.disabled = true;
+  try {
+    const m = await must(sb.from("messages").insert({ recipient: chatWith, body }).select().single());
+    input.value = "";
+    if (!chatLog.some((x) => x.id === m.id)) chatLog.push(m);
+    inbox.unshift(m);
+    renderInbox();
+    input.focus();
+  } catch (err) {
+    toast(explain(err), true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function subscribeInbox() {
+  if (dmChannel) sb.removeChannel(dmChannel);
+  dmChannel = null;
+  if (!dmReady) return;
+  dmChannel = sb.channel(`inbox-${me.id}`)
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: `recipient=eq.${me.id}` },
+      (payload) => receive(payload.new))
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages", filter: `sender=eq.${me.id}` }, (payload) => {
+      for (const m of [...inbox, ...chatLog]) if (m.id === payload.new.id) m.read_at = payload.new.read_at;
+      if (current === "inbox") renderChat();
+    })
+    .subscribe();
+}
+
+async function receive(m) {
+  if (inbox.some((x) => x.id === m.id)) return;
+  inbox.unshift(m);
+  if (!team.some((p) => p.id === m.sender)) {
+    team = await must(sb.from("profiles").select("id, display_name, is_admin").neq("id", me.id).order("display_name")).catch(() => team);
+  }
+  if (current === "inbox" && chatWith === m.sender) {
+    chatLog.push(m);
+    if (!document.hidden) sb.rpc("mark_read", { p_from: m.sender }).then(({ error }) => { if (!error) markReadHere(m.sender); });
+  } else {
+    toast(`✉ ${m.sender_name}: ${m.body.length > 80 ? m.body.slice(0, 80) + "…" : m.body}`);
+  }
+  renderUnread();
+  if (current === "inbox") renderInbox();
+  if (current === "home") renderHomeMessages();
+}
+
 // ---------- admin: team ----------
 async function openAdmin() {
   $("#admin").showModal();
@@ -804,6 +1178,7 @@ async function deleteProject(p) {
     toast("Deleted.");
     await loadProjects();
     renderProjectAdmin();
+    if (current === "home") renderHome().catch(() => {});
   } catch (err) { toast(explain(err), true); }
 }
 
@@ -944,6 +1319,7 @@ async function runImport() {
     await loadProjects();
     $("#project-select").value = proj.id;
     await openProject(projects.find((p) => p.id === proj.id));
+    if (current === "home") renderHome().catch(() => {});
   } catch (err) {
     msg.className = "msg error";
     msg.textContent = explain(err) + " – if the project was half created, delete it and import again.";
@@ -984,14 +1360,6 @@ function weekTotals(w) {
   return t;
 }
 
-function showDash(on) {
-  if (on && !project) { toast("Import a game file first (Admin → Projects)."); return; }
-  $("#dash").hidden = !on;
-  $(".layout").hidden = on;
-  $("#dash-btn").textContent = on ? "← Translate" : "Dashboard";
-  if (on) loadDash().catch((err) => toast(explain(err), true));
-}
-
 async function loadDash(quiet = false) {
   const token = ++dashToken;
   const p = project.id;
@@ -1025,7 +1393,7 @@ async function loadDash(quiet = false) {
 let dashTimer;
 function scheduleDash() {
   clearTimeout(dashTimer);
-  dashTimer = setTimeout(() => { if (!$("#dash").hidden && project) loadDash(true).catch(() => {}); }, 3000);
+  dashTimer = setTimeout(() => { if (current === "dash" && project) loadDash(true).catch(() => {}); }, 3000);
 }
 
 function renderWeekSelect() {
@@ -1445,14 +1813,20 @@ function init() {
     $$(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     $$(".tab-panel").forEach((p) => { p.hidden = p.dataset.panel !== tab.dataset.tab; });
   }));
-  $("#dash-btn").addEventListener("click", () => showDash($("#dash").hidden));
+  $$("[data-go]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.go)));
+  $("#home-btn").addEventListener("click", () => setView("home"));
+  $("#chat-form").addEventListener("submit", sendMessage);
+  $("#chat-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#chat-form").requestSubmit(); }
+  });
+  $("#chat-back").addEventListener("click", () => { chatWith = null; $("#inbox").classList.remove("chatting"); renderInbox(); });
   $("#dash-week").addEventListener("change", (e) => pickWeek(e.target.value));
   $("#dash-copy").addEventListener("click", copyReport);
   $("#heat-measure").addEventListener("change", () => { if (dash) renderHeat(); });
   let resizeFrame;
   new ResizeObserver(() => {
     cancelAnimationFrame(resizeFrame);
-    resizeFrame = requestAnimationFrame(() => { if (dash && !$("#dash").hidden) renderCharts(); });
+    resizeFrame = requestAnimationFrame(() => { if (dash && current === "dash") renderCharts(); });
   }).observe($("#dash-charts"));
   $("#invite-form").addEventListener("submit", invite);
   for (const id of ["#imp-csv", "#imp-cfg", "#imp-notes"]) $(id).addEventListener("change", prepareImport);
@@ -1465,7 +1839,14 @@ function init() {
       $("#newpass-form").hidden = false;
       return;
     }
-    if (event === "SIGNED_OUT") { me = null; if (channel) sb.removeChannel(channel); showOnly("#login"); return; }
+    if (event === "SIGNED_OUT") {
+      me = null;
+      if (channel) sb.removeChannel(channel);
+      if (dmChannel) sb.removeChannel(dmChannel);
+      chatWith = null;
+      showOnly("#login");
+      return;
+    }
     if (event === "SIGNED_IN" && !me) setTimeout(start, 0); // outside the auth callback (supabase-js advice)
   });
   start().catch((err) => { showOnly("#login"); $("#login-msg").textContent = explain(err); });
