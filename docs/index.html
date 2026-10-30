@@ -67,6 +67,7 @@
         <option value="untranslated">Untranslated</option>
         <option value="done">Approved</option>
       </select>
+      <button id="dash-btn" class="ghost" type="button" hidden>Dashboard</button>
       <button id="admin-btn" class="ghost" type="button" hidden>Admin</button>
       <span id="me" class="me"></span>
       <button id="logout" class="ghost" type="button">Sign out</button>
@@ -93,6 +94,79 @@
       <div id="lines" class="lines"></div>
     </main>
   </div>
+
+  <!-- ======================= dashboard (admin) ======================= -->
+  <main id="dash" class="dash" hidden>
+    <div class="dash-head">
+      <div>
+        <div class="muted small">Dashboard</div>
+        <h2 id="dash-title"></h2>
+      </div>
+      <div class="dash-tools">
+        <label class="small muted" for="dash-week">Week</label>
+        <select id="dash-week"></select>
+        <button id="dash-copy" class="primary" type="button">Copy weekly report</button>
+      </div>
+    </div>
+
+    <div id="dash-tiles" class="tiles"></div>
+
+    <div class="dash-grid" id="dash-charts">
+      <section class="card dash-card">
+        <h3>Lines with an approved translation</h3>
+        <p id="chart-progress-sub" class="hint"></p>
+        <div id="chart-progress" class="chart"></div>
+      </section>
+      <section class="card dash-card">
+        <h3>Translations written per week</h3>
+        <p class="hint">Every new version, by anyone on the team.</p>
+        <div id="chart-written" class="chart"></div>
+      </section>
+    </div>
+    <details class="table-view">
+      <summary>Show the charts as a table</summary>
+      <div class="table-wrap"><table class="table" id="weeks-table"></table></div>
+    </details>
+
+    <section class="card dash-card">
+      <h3 id="report-title">Weekly report</h3>
+      <p id="report-summary" class="report-summary"></p>
+      <div class="report-cols">
+        <div>
+          <h4>Who did what</h4>
+          <div class="table-wrap"><table class="table" id="week-people"></table></div>
+        </div>
+        <div>
+          <h4>Where the work went</h4>
+          <div class="table-wrap"><table class="table" id="week-scenes"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card dash-card">
+      <div class="card-head">
+        <h3>Week by week</h3>
+        <select id="heat-measure" aria-label="Show">
+          <option value="written">Translations written</option>
+          <option value="approved">Their translations approved</option>
+          <option value="reviewed">Reviews done</option>
+          <option value="notes">Notes</option>
+        </select>
+      </div>
+      <p class="hint">One row per person, the last 12 weeks. The darker the cell, the more that week.</p>
+      <div class="table-wrap"><table class="table heat" id="heat-table"></table></div>
+    </section>
+
+    <section class="card dash-card">
+      <h3>Contributions so far</h3>
+      <p class="hint">Everything in this project, imports included. "Not used" = turned down, or replaced by a newer
+        approved version.</p>
+      <div class="legend small">
+        <span><i class="sw done"></i>Approved</span><span><i class="sw review"></i>Waiting</span><span><i class="sw todo"></i>Not used</span>
+      </div>
+      <div class="table-wrap"><table class="table" id="people-table"></table></div>
+    </section>
+  </main>
 </div>
 
 <!-- ======================= admin ======================= -->
@@ -104,7 +178,6 @@
   <nav class="tabs" role="tablist">
     <button type="button" class="tab active" data-tab="team">Team</button>
     <button type="button" class="tab" data-tab="projects">Projects</button>
-    <button type="button" class="tab" data-tab="people">Who did what</button>
   </nav>
 
   <section class="tab-panel" data-panel="team">
@@ -151,11 +224,6 @@
         <button id="imp-go" class="primary" type="button" disabled>Import</button>
       </div>
     </details>
-  </section>
-
-  <section class="tab-panel" data-panel="people" hidden>
-    <p class="hint">Per person, in the open project. "Not used" = turned down, or replaced by a newer approved version.</p>
-    <div class="table-wrap"><table class="table" id="people-table"></table></div>
   </section>
 </dialog>
 

@@ -147,8 +147,15 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   (it doesn't lock it).
 - **Admin panel:** invite or remove people, who can approve, import a game file (with the desktop
   editor's `.translation.json` and `.notes.json`, so names, review flags and notes come along),
-  **export the game file** (only approved lines, or also the waiting ones), and who did what.
+  **export the game file** (only approved lines, or also the waiting ones).
   The exported CSV is byte-for-byte the original except the lines whose translation changed.
+- **Dashboard (admin):** progress at a glance, a chart of approved lines and of translations
+  written per week, and a **weekly report** for any of the last 12 weeks: who wrote, reviewed and
+  commented how much (compared with the week before) and which scenes the work went into.
+  **Copy weekly report** puts it on the clipboard as plain text for the team chat. Below that,
+  each person's work week by week and their contributions so far.
+  A database set up before the dashboard existed needs `docs/supabase/update-2-dashboard.sql` run
+  once (Supabase → SQL Editor → New query → paste → Run).
 
 Set up once (admin):
 
