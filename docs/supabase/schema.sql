@@ -79,6 +79,10 @@ create table public.versions (
 create index versions_line on public.versions (line_id);
 create index versions_project on public.versions (project_id, status);
 create unique index versions_one_main on public.versions (line_id) where status = 'approved';
+create index versions_author on public.versions (author, created_at desc);
+create index versions_created on public.versions (created_at desc);
+create index versions_project_created on public.versions (project_id, created_at);
+create index versions_project_decided on public.versions (project_id, decided_at);
 
 -- Notes on a line: a little conversation, oldest first.
 create table public.notes (
@@ -92,6 +96,7 @@ create table public.notes (
   created_at  timestamptz not null default now()
 );
 create index notes_line on public.notes (line_id);
+create index notes_created on public.notes (created_at desc);
 
 -- One vote per person per version. Votes stay after the decision, as its record.
 create table public.votes (
@@ -107,6 +112,7 @@ create table public.votes (
 );
 create index votes_project on public.votes (project_id);
 create index votes_voter on public.votes (voter);
+create index votes_created on public.votes (created_at desc);
 
 -- "I'm working on this scene" - a sign for the others, not a lock.
 create table public.claims (
@@ -184,6 +190,15 @@ begin
     new.imported := false;
     new.created_at := now();
   end if;
+  -- a version or note always belongs to its line's project
+  new.project_id := coalesce((select project_id from lines where id = new.line_id), new.project_id);
+  -- a new suggestion carries no decision (nobody can hand out "review" credit by inserting one)
+  if tg_table_name = 'versions' then  -- (nested: notes have no status column)
+    if new.status = 'pending' then
+      new.decided_by_name := null;
+      new.decided_at := null;
+    end if;
+  end if;
   return new;
 end $$;
 create trigger stamp_versions before insert on public.versions
@@ -242,42 +257,50 @@ alter table public.notes    enable row level security;
 alter table public.claims   enable row level security;
 alter table public.messages enable row level security;
 
-create policy "admin manages invites" on public.invites for all using (is_admin()) with check (is_admin());
+create policy "admin manages invites" on public.invites for all using ((select is_admin())) with check ((select is_admin()));
 
-create policy "team sees the team" on public.profiles for select using (is_member());
-create policy "admin changes roles" on public.profiles for update using (is_admin()) with check (is_admin());
-create policy "admin removes people" on public.profiles for delete using (is_admin() and id <> auth.uid());
+create policy "team sees the team" on public.profiles for select using ((select is_member()));
+create policy "admin changes roles" on public.profiles for update using ((select is_admin())) with check ((select is_admin()));
+create policy "admin removes people" on public.profiles for delete using ((select is_admin()) and id <> (select auth.uid()));
 
-create policy "team reads projects" on public.projects for select using (is_member());
-create policy "admin writes projects" on public.projects for all using (is_admin()) with check (is_admin());
+create policy "team reads projects" on public.projects for select using ((select is_member()));
+create policy "admin writes projects" on public.projects for all using ((select is_admin())) with check ((select is_admin()));
 
-create policy "team reads lines" on public.lines for select using (is_member());
-create policy "admin writes lines" on public.lines for all using (is_admin()) with check (is_admin());
+create policy "team reads lines" on public.lines for select using ((select is_member()));
+create policy "admin writes lines" on public.lines for all using ((select is_admin())) with check ((select is_admin()));
 
-create policy "team reads versions" on public.versions for select using (is_member());
+create policy "team reads versions" on public.versions for select using ((select is_member()));
 create policy "team suggests" on public.versions for insert
-  with check (is_member() and (status = 'pending' or is_admin()));
+  with check ((select is_member()) and (status = 'pending' or (select is_admin())));
 create policy "change own suggestion" on public.versions for update
-  using (author = auth.uid() and status = 'pending') with check (author = auth.uid() and status = 'pending');
+  using (author = (select auth.uid()) and status = 'pending') with check (author = (select auth.uid()) and status = 'pending');
 create policy "withdraw own suggestion" on public.versions for delete
-  using ((author = auth.uid() and status = 'pending') or is_admin());
+  using ((author = (select auth.uid()) and status = 'pending') or (select is_admin()));
 
-create policy "team reads notes" on public.notes for select using (is_member());
-create policy "team writes notes" on public.notes for insert with check (is_member());
-create policy "delete own note" on public.notes for delete using (author = auth.uid() or is_admin());
+create policy "team reads notes" on public.notes for select using ((select is_member()));
+create policy "team writes notes" on public.notes for insert with check ((select is_member()));
+create policy "delete own note" on public.notes for delete using (author = (select auth.uid()) or (select is_admin()));
 
-create policy "team reads claims" on public.claims for select using (is_member());
-create policy "team claims" on public.claims for insert with check (is_member());
-create policy "unclaim own" on public.claims for delete using (user_id = auth.uid());
+create policy "team reads claims" on public.claims for select using ((select is_member()));
+create policy "team claims" on public.claims for insert with check ((select is_member()));
+create policy "unclaim own" on public.claims for delete using (user_id = (select auth.uid()));
 
 create policy "read own messages" on public.messages for select
-  using (is_member() and auth.uid() in (sender, recipient));
+  using ((select is_member()) and (select auth.uid()) in (sender, recipient));
 create policy "write to a teammate" on public.messages for insert
-  with check (is_member() and sender = auth.uid() and recipient <> auth.uid());
+  with check ((select is_member()) and sender = (select auth.uid()) and recipient <> (select auth.uid()));
 
 alter table public.votes enable row level security;
-create policy "team reads votes" on public.votes for select using (is_member());
+create policy "team reads votes" on public.votes for select using ((select is_member()));
 -- no insert/update/delete rules: voting only goes through vote() below
+
+-- A suggestion's author can change its words - nothing else (not its author, line, dates or status).
+-- Decisions and votes go through the functions below, which run with the owner's rights.
+revoke update on public.versions from anon, authenticated;
+grant update (text) on public.versions to authenticated;
+-- Sizes: nobody fills the database with megabytes of text.
+alter table public.versions add constraint versions_text_size check (length(text) <= 10000) not valid;
+alter table public.claims add constraint claims_name_size check (length(grp) <= 200 and length(scene) <= 200) not valid;
 
 -- ---------------------------------------------------------------------------------------------
 -- Approving: by a 2/3 vote of the people who can vote, or directly by the admin.
@@ -616,8 +639,8 @@ create table public.glossary (
 );
 create index glossary_project on public.glossary (project_id);
 alter table public.glossary enable row level security;
-create policy "team reads the glossary" on public.glossary for select using (is_member());
-create policy "admin writes the glossary" on public.glossary for all using (is_admin()) with check (is_admin());
+create policy "team reads the glossary" on public.glossary for select using ((select is_member()));
+create policy "admin writes the glossary" on public.glossary for all using ((select is_admin())) with check ((select is_admin()));
 
 -- Notifications: your translation was approved or turned down, someone disagreed (and why), someone
 -- replied on a line you worked on, or mentioned you with @Name. Only you see yours.
@@ -634,7 +657,7 @@ create table public.notifications (
 );
 create index notifications_user on public.notifications (user_id, created_at desc);
 alter table public.notifications enable row level security;
-create policy "read own notifications" on public.notifications for select using (user_id = auth.uid());
+create policy "read own notifications" on public.notifications for select using (user_id = (select auth.uid()));
 
 create function public.mark_notifications_read(p_ids bigint[] default null) returns void
 language sql security definer set search_path = public as $$
@@ -699,21 +722,21 @@ language sql stable as $$
   select x.kind, x.at, x.who, x.project_id, x.line_id, l.grp, l.scene, x.body
   from (
     (select 'wrote' as kind, created_at as at, author_name as who, project_id, line_id, left(text, 120) as body
-       from versions where not imported order by created_at desc limit p_limit)
+       from versions where not imported order by created_at desc limit least(greatest(p_limit, 1), 100))
     union all
     (select status, decided_at, decided_by_name, project_id, line_id, left(text, 120)
        from versions where status in ('approved', 'rejected', 'superseded') and decided_at is not null
-        and decided_by_name <> 'Imported' order by decided_at desc limit p_limit)
+        and decided_by_name <> 'Imported' order by decided_at desc limit least(greatest(p_limit, 1), 100))
     union all
     (select 'note', created_at, author_name, project_id, line_id, left(body, 120)
-       from notes where not imported order by created_at desc limit p_limit)
+       from notes where not imported order by created_at desc limit least(greatest(p_limit, 1), 100))
     union all
     (select case when agree then 'agree' else 'disagree' end, created_at, voter_name, project_id, line_id, coalesce(reason, '')
-       from votes order by created_at desc limit p_limit)
+       from votes order by created_at desc limit least(greatest(p_limit, 1), 100))
   ) x
   join lines l on l.id = x.line_id
   order by x.at desc
-  limit p_limit
+  limit least(greatest(p_limit, 1), 100)
 $$;
 
 -- Day by day (in the reader's time zone): what each person did. Same columns as weekly_activity.
@@ -721,7 +744,7 @@ create function public.daily_activity(p_project bigint, p_days int default 30, p
 returns table (day date, name text, written bigint, approved bigint, reviewed bigint, notes bigint)
 language sql stable as $$
   with since as (
-    select (date_trunc('day', now() at time zone p_tz) - make_interval(days => p_days - 1)) at time zone p_tz as t
+    select (date_trunc('day', now() at time zone p_tz) - make_interval(days => least(greatest(p_days, 1), 366) - 1)) at time zone p_tz as t
   ), x as (
     select author_name as name, created_at as t, 1 as w, 0 as a, 0 as r, 0 as n
       from versions where project_id = p_project and author_name <> 'Imported'
@@ -746,25 +769,36 @@ language sql stable as $$
 $$;
 
 -- At the end of each day: lines with an approved translation, and versions waiting for review.
+-- One pass over the versions (counts per day, then running totals) - not one pass per day.
 create function public.daily_progress(p_project bigint, p_days int default 30, p_tz text default 'UTC')
 returns table (day date, approved bigint, waiting bigint, total bigint)
 language sql stable as $$
-  with first as (
-    select min(decided_at) as t from versions
-    where project_id = p_project and status in ('approved', 'superseded')
-    group by line_id
-  ), days as (
+  with days as (
     select (date_trunc('day', now() at time zone p_tz) - make_interval(days => g))::date as day
-    from generate_series(0, p_days - 1) g
-  ), ends as (
-    select day, (day + 1)::timestamp at time zone p_tz as e from days
+    from generate_series(0, least(greatest(p_days, 1), 366) - 1) g
+  ), ev as (  -- per day: lines approved for the first time, versions written, versions decided
+    select (x.t at time zone p_tz)::date as day, sum(x.a) as a, sum(x.c) as c, sum(x.r) as r
+    from (
+      select min(decided_at) as t, 1 as a, 0 as c, 0 as r from versions
+        where project_id = p_project and status in ('approved', 'superseded') group by line_id
+      union all
+      select created_at, 0, 1, 0 from versions where project_id = p_project
+      union all
+      select decided_at, 0, 0, 1 from versions
+        where project_id = p_project and status <> 'pending' and decided_at is not null
+    ) x
+    where x.t is not null
+    group by 1
+  ), before as (
+    select coalesce(sum(a), 0) as a, coalesce(sum(c), 0) - coalesce(sum(r), 0) as w
+    from ev where ev.day < (select min(day) from days)
   )
   select d.day,
-         (select count(*) from first where first.t < d.e),
-         (select count(*) from versions v where v.project_id = p_project and v.created_at < d.e
-            and (v.status = 'pending' or v.decided_at >= d.e)),  -- still waiting then (decided later, or still now)
+         (b.a + sum(coalesce(e.a, 0)) over w)::bigint,
+         (b.w + sum(coalesce(e.c, 0) - coalesce(e.r, 0)) over w)::bigint,
          (select count(*) from lines where project_id = p_project)
-  from ends d
+  from days d left join ev e on e.day = d.day cross join before b
+  window w as (order by d.day)
   order by d.day
 $$;
 
@@ -810,6 +844,18 @@ language sql stable as $$
   order by count(*) filter (where w) + count(*) filter (where ap) desc, min(idx)
   limit p_limit
 $$;
+
+-- "Who's online" (live presence) only for the team, not for anyone who has the site's public key.
+-- (Supabase keeps live channels in realtime.messages; the page joins "presence-team" as a private channel.)
+do $do$
+begin
+  if to_regclass('realtime.messages') is not null then
+    execute $p$create policy "team presence: see" on realtime.messages for select to authenticated
+      using ((select public.is_member()) and realtime.topic() = 'presence-team' and extension = 'presence')$p$;
+    execute $p$create policy "team presence: join" on realtime.messages for insert to authenticated
+      with check ((select public.is_member()) and realtime.topic() = 'presence-team' and extension = 'presence')$p$;
+  end if;
+end $do$;
 
 -- Live updates on everyone's screen.
 alter publication supabase_realtime add table public.versions, public.notes, public.claims, public.messages, public.votes,

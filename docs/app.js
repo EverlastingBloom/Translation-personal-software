@@ -987,12 +987,18 @@ function askReason(l, v, actions) {
 
 // ---------- @mentions in notes ----------
 /** A note with @Name of teammates highlighted (yours stands out). */
+let mentionRe = null, mentionFor = null; // built once per team, not for every note
+
 function withMentions(body) {
   const frag = document.createDocumentFragment();
-  const names = people.map((p) => p.display_name).filter(Boolean).sort((a, b) => b.length - a.length)
-    .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  if (!names.length) { frag.append(body); return frag; }
-  const re = new RegExp(`@(${names.join("|")})(?![\\p{L}\\p{N}])`, "giu");
+  if (mentionFor !== people) {
+    const names = people.map((p) => p.display_name).filter(Boolean).sort((a, b) => b.length - a.length)
+      .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    mentionRe = names.length ? new RegExp(`@(${names.join("|")})(?![\\p{L}\\p{N}])`, "giu") : null;
+    mentionFor = people;
+  }
+  const re = mentionRe;
+  if (!re) { frag.append(body); return frag; }
   let last = 0;
   for (const m of body.matchAll(re)) {
     const mine = m[1].toLowerCase() === me.display_name.toLowerCase();
@@ -1070,8 +1076,13 @@ async function openFromHash() {
   const m = /^#line=(\d+):(\d+)$/.exec(location.hash);
   if (!m || !me) return false;
   history.replaceState(null, "", location.pathname + location.search);
-  await goLine(projects.find((x) => x.id === Number(m[1])), Number(m[2]));
-  return true;
+  try {
+    await goLine(projects.find((x) => x.id === Number(m[1])), Number(m[2]));
+    return current === "translate";
+  } catch (err) { // a broken link must not stop the site from starting
+    toast(explain(err), true);
+    return false;
+  }
 }
 
 function focusLine(id, flash = false, scroll = true) {
@@ -1109,7 +1120,7 @@ async function goNextTodo() {
   if (first) focusLine(first.dataset.id);
 }
 
-/** Alt+A / Alt+D: vote on the line you're on (the first version there you can vote on). */
+/** Alt+A / Alt+X: vote on the line you're on (the first version there you can vote on). */
 function voteFocused(agree) {
   const l = lines.find((x) => x.id === currentLineId);
   const v = l?.versions.find((x) => x.status === "pending" && canVoteOn(x) && (!view.author || x.author_name === view.author));
@@ -1123,7 +1134,7 @@ function onShortcut(e) {
   if (current !== "translate" || e.ctrlKey || e.metaKey) return;
   if (e.altKey) {
     const act = { ArrowDown: () => moveLine(1), ArrowUp: () => moveLine(-1), KeyN: goNextTodo,
-                  KeyA: () => voteFocused(true), KeyD: () => voteFocused(false) }[e.code];
+                  KeyA: () => voteFocused(true), KeyX: () => voteFocused(false) }[e.code];
     if (act) { e.preventDefault(); act(); }
     return;
   }
@@ -1978,14 +1989,20 @@ function trackPresence() {
                           grp: view?.scene != null ? view.grp : null, scene: view?.scene ?? null }).catch?.(() => {});
 }
 
-function startPresence() {
+/** A private channel: only signed-in team members may see or join it (update 8 adds the rule).
+    Without that rule the join is refused, and the old public channel keeps "who's online" working. */
+function startPresence(isPrivate = true) {
   if (presenceChannel) sb.removeChannel(presenceChannel);
-  presenceChannel = sb.channel("presence-team", { config: { presence: { key: me.id } } });
-  presenceChannel.on("presence", { event: "sync" }, () => {
-    const state = presenceChannel.presenceState ? presenceChannel.presenceState() : {};
+  const ch = sb.channel("presence-team", { config: { private: isPrivate, presence: { key: me.id } } });
+  presenceChannel = ch;
+  ch.on("presence", { event: "sync" }, () => {
+    const state = ch.presenceState ? ch.presenceState() : {};
     online = Object.values(state).map((list) => list[list.length - 1]).filter((u) => u && u.id !== me.id);
     renderPresence();
-  }).subscribe((status) => { if (status === "SUBSCRIBED") trackPresence(); });
+  }).subscribe((status) => {
+    if (status === "SUBSCRIBED") trackPresence();
+    else if (status === "CHANNEL_ERROR" && isPrivate && presenceChannel === ch) startPresence(false);
+  });
 }
 
 function presenceIn(s) {

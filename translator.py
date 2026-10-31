@@ -1380,7 +1380,9 @@ def make_handler(library):
         def serve_static(self, path):
             name = "index.html" if path in ("/", "") else path.lstrip("/")
             full = os.path.normpath(os.path.join(WEB_DIR, name))
-            if not full.startswith(WEB_DIR) or not os.path.isfile(full):
+            # inside web/ itself – a plain prefix test would also let "../web-old/…" through
+            inside = os.path.normcase(os.path.commonpath([full, WEB_DIR])) == os.path.normcase(os.path.normpath(WEB_DIR))
+            if not inside or not os.path.isfile(full):
                 self.send_error(404)
                 return
             with open(full, "rb") as fh:

@@ -188,7 +188,7 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   terms it doesn't use, or being much longer than the original. **Next untranslated →** (Alt+N)
   jumps to the next line to do, across scenes. **Compact** fits more lines on screen; **Side by
   side** puts the original left and the translations right. 🔗 on a line copies a link straight
-  to it. Keyboard: Alt+↓/↑ next/previous line, Alt+A / Alt+D agree / disagree, Ctrl+Enter send,
+  to it. Keyboard: Alt+↓/↑ next/previous line, Alt+A / Alt+X agree / disagree, Ctrl+Enter send,
   Esc undo then leave the box, / search, ? all shortcuts.
 - **Working together:** a 👎 can say why. Write @Name in a note to mention someone. The 🔔 bell
   tells you when your translation is approved or turned down, someone disagrees (and why),
@@ -207,6 +207,7 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   `update-5-votes.sql` (approving by 2/3 vote),
   `update-6-admin-power.sql` (the admin power switch),
   `update-7-team-features.sql` (notifications, vote reasons, glossary, goals, daily statistics),
+  `update-8-hardening.sql` (security fixes and faster queries – run this one even if nothing seems wrong),
   all in `docs/supabase/`.
 
 Set up once (admin):
@@ -222,6 +223,9 @@ Set up once (admin):
 5. Open the site → *First time here? Create your password* with your admin email → confirm the
    email → sign in → **Admin → Projects → Import a game file**.
 6. **Admin → Team**: invite your translators and send them the link.
+
+Keep *Confirm email* switched **on** in Supabase: the database only lets invited emails sign up,
+and confirming proves the person really owns that address.
 
 `docs/config.js` holds the Supabase address and its *publishable* key – both are meant to be
 public. Never put the *secret / service_role* key in this repository.
