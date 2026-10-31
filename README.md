@@ -149,13 +149,19 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
 - **Reviewing per person.** *⚑ Everything waiting for review* has a tab for everyone and one tab
   per person with their count. Everyone has their own colour and initials, shown on each line
   ("⚑ from …") and on every version, so you can see at a glance who submitted what.
-- **Nothing is overwritten.** Every translation is a *version* with its author and time. It waits
-  for review until someone **other than its author** approves it (people who "can approve"). The
-  admin may approve anything, their own translations too. If two people translate the same line, both versions wait side by side; the approved one
-  becomes the main translation, the rest stay in the line's history.
+- **Nothing is overwritten.** Every translation is a *version* with its author and time. If two
+  people translate the same line, both versions wait side by side; the approved one becomes the
+  main translation, the rest stay in the line's history.
+- **Approved by a 2/3 vote.** Everyone who "can vote" (set per person in *Admin → Team*) votes
+  **👍 Agree** or **👎 Disagree** on the others' waiting translations – never on their own. A
+  version is approved as soon as 2/3 of the people who can vote on it agree (e.g. 2 of 3, 3 of 4),
+  and turned down once 2/3 can't be reached any more. Each version shows how many agree votes it
+  still needs and who voted; the **🗳 Needs your vote** tab lists what you haven't voted on yet.
+  Changing the words of a suggestion clears its votes. The **admin** doesn't vote: they can
+  approve or turn down any version directly, at any time.
 - **Notes** are a small conversation on each line. **✋ Claim** tells the others you're on a scene
   (it doesn't lock it).
-- **Admin panel:** invite or remove people, who can approve, import a game file (with the desktop
+- **Admin panel:** invite or remove people, who can vote, import a game file (with the desktop
   editor's `.translation.json` and `.notes.json`, so names, review flags and notes come along),
   **export the game file** (only approved lines, or also the waiting ones).
   The exported CSV is byte-for-byte the original except the lines whose translation changed.
@@ -168,6 +174,7 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   once, in order (Supabase → SQL Editor → New query → paste → Run):
   `update-1-admin-approves-own.sql`, `update-2-dashboard.sql` (the dashboard), `update-3-welcome-messages.sql` (messages and the
   welcome page's progress), `update-4-replies-review-tabs.sql` (replies, review tabs per person),
+  `update-5-votes.sql` (approving by 2/3 vote),
   all in `docs/supabase/`.
 
 Set up once (admin):

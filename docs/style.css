@@ -231,6 +231,16 @@ dialog::backdrop { background: rgba(0, 0, 0, .4); }
 .version.by { border-left: 4px solid var(--pc); }
 .version.focus { box-shadow: 0 0 0 1px var(--pc); }
 .version.dim { opacity: .55; }
+.votes { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; margin-top: 6px; }
+.vote-meter { display: inline-flex; gap: 3px; }
+.vote-meter .pip { width: 14px; height: 6px; border-radius: 3px; background: var(--todo); }
+.vote-meter .pip.yes { background: var(--done); }
+.vote-text { color: var(--muted); }
+.voters { display: inline-flex; gap: 4px 8px; flex-wrap: wrap; }
+.vote-mark { font-size: 11px; }
+.vote-btn.voted-yes { background: var(--main-bg); border-color: var(--done); color: var(--main-text); font-weight: 600; }
+.vote-btn.voted-no { border-color: var(--warn); color: var(--warn); font-weight: 600; }
+.rtab-vote { border-color: var(--accent); }
 .review-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: -4px 0 14px; max-width: 980px; }
 .rtab { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 4px 10px 4px 6px; font-size: 14px; }
 .rtab:first-child { padding-left: 12px; }

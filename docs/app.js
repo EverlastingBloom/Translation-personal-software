@@ -48,6 +48,9 @@ function explain(err) {
   if (/weekly_activity|weekly_progress|week_scenes/i.test(m) && /function/i.test(m)) {
     return "The dashboard needs a database update: run docs/supabase/update-2-dashboard.sql in Supabase → SQL Editor.";
   }
+  if (/need_my_vote|function public\.vote|p_unvoted/i.test(m)) {
+    return "Voting isn't set up yet: the admin runs docs/supabase/update-5-votes.sql in Supabase → SQL Editor.";
+  }
   if (/reply_to/i.test(m)) {
     return "Replies aren't set up yet: the admin runs docs/supabase/update-4-replies-review-tabs.sql in Supabase → SQL Editor.";
   }
@@ -207,7 +210,7 @@ async function start() {
   if (!prof) { showOnly("#noaccess"); return; }
   me = prof;
   $("#me").textContent = me.display_name;
-  $("#me").title = `${me.email}${me.is_admin ? " · admin" : me.can_review ? " · can approve" : ""}`;
+  $("#me").title = `${me.email}${me.is_admin ? " · admin" : me.can_review ? " · can vote" : ""}`;
   $("#admin-btn").hidden = !me.is_admin;
   $("#dash-btn").hidden = !me.is_admin;
   setView("home", false);
@@ -376,7 +379,9 @@ async function openScene(grp, scene) {
 async function loadLines() {
   const args = { p_project: project.id, p_state: $("#filter").value || null };
   if (view.search) Object.assign(args, { p_search: view.search, p_limit: 300 });
-  else if (view.review) Object.assign(args, { p_state: "review", p_limit: 300 }, view.author ? { p_author: view.author } : {});
+  else if (view.review) {
+    Object.assign(args, { p_state: "review", p_limit: 300 }, view.author ? { p_author: view.author } : {}, view.unvoted ? { p_unvoted: true } : {});
+  }
   else Object.assign(args, { p_grp: view.grp, p_scene: view.scene });
   if (!view.review) $("#review-tabs").hidden = true;
   const asked = view;
@@ -395,7 +400,7 @@ async function loadLines() {
   box.textContent = "";
   if (!lines.length) {
     box.append(el("p", "empty", view.search ? "Nothing found."
-      : view.review ? (view.author ? `Nothing of ${view.author}'s is waiting for review.` : "Nothing is waiting for review.")
+      : view.review ? (view.unvoted ? "Nothing is waiting for your vote. 🎉" : view.author ? `Nothing of ${view.author}'s is waiting for review.` : "Nothing is waiting for review.")
       : $("#filter").value ? "No lines like that here." : "This scene is empty."));
     return;
   }
@@ -449,6 +454,7 @@ function renderLine(l) {
     who.append("✓ by ", personChip(approved.author_name || "?"),
       ` · approved by ${approved.decided_by_name || "?"} ${timeAgo(approved.decided_at)}`);
     main.append(el("div", "main-text", approved.text), who);
+    if (approved.decided_by_name === "Team vote" && approved.votes?.length) main.append(voteRecord(approved));
   } else {
     main.append(el("div", "who", "No approved translation yet"));
   }
@@ -489,22 +495,33 @@ function renderVersion(l, v) {
   body.append(who);
   box.append(body);
 
+  if (v.status === "pending") body.append(renderVotes(v));
+  else if (v.decided_by_name === "Team vote" && v.votes?.length) body.append(voteRecord(v));
+
   const actions = el("div", "version-actions");
   const own = isOwn(v);
-  const mayDecide = (me.can_review || me.is_admin) && (!own || me.is_admin); // the admin may approve their own
+  const mayDecide = me.is_admin; // everyone else votes
   if (v.status === "pending") {
-    if (me.can_review || me.is_admin) {
+    if (me.is_admin) {
       const ok = el("button", "small primary", "✓ Approve");
       ok.type = "button";
-      ok.disabled = !mayDecide;
-      ok.title = mayDecide ? "Make this the main translation" : "You can't approve your own translation – someone else checks it.";
+      ok.title = "Approve now, without waiting for the vote";
       ok.addEventListener("click", () => decide(l, v, "approve_version"));
-      actions.append(ok);
-      if (mayDecide) {
-        const no = el("button", "small", "Not this one");
-        no.type = "button";
-        no.addEventListener("click", () => decide(l, v, "reject_version"));
-        actions.append(no);
+      const no = el("button", "small", "Not this one");
+      no.type = "button";
+      no.title = "Turn it down now, without waiting for the vote";
+      no.addEventListener("click", () => decide(l, v, "reject_version"));
+      actions.append(ok, no);
+    } else if (canVoteOn(v)) {
+      const mine = (v.votes || []).find((x) => x.voter === me.id);
+      for (const [agree, label, done] of [[true, "👍 Agree", "👍 You agreed"], [false, "👎 Disagree", "👎 You disagreed"]]) {
+        const pressed = mine?.agree === agree;
+        const b = el("button", "small vote-btn" + (pressed ? (agree ? " voted-yes" : " voted-no") : agree ? " primary" : ""), pressed ? done : label);
+        b.type = "button";
+        b.setAttribute("aria-pressed", String(pressed));
+        b.title = pressed ? "Click to take your vote back" : agree ? "This translation is good" : "This translation isn't right yet";
+        b.addEventListener("click", () => castVote(l, v, pressed ? null : agree));
+        actions.append(b);
       }
     }
     if (own && !v.imported) {
@@ -628,6 +645,72 @@ async function submit(l, text, next) {
   }
 }
 
+// ---------- voting: 2/3 of the people who can vote approve; the admin decides directly ----------
+function isAuthorOf(v, p) {
+  return v.imported ? (v.author_name || "").toLowerCase() === p.display_name.toLowerCase() : v.author === p.id;
+}
+
+/** Who may vote on this version: everyone who can vote, except the admin and its author. */
+function votePool(v) { return people.filter((p) => p.can_review && !p.is_admin && !isAuthorOf(v, p)); }
+
+function canVoteOn(v) { return me.can_review && !me.is_admin && !isAuthorOf(v, me); }
+
+function voteCount(v) {
+  const pool = votePool(v);
+  const ids = new Set(pool.map((p) => p.id));
+  const counted = (v.votes || []).filter((x) => ids.has(x.voter));
+  return { pool: pool.length, need: Math.ceil(pool.length * 2 / 3), yes: counted.filter((x) => x.agree), no: counted.filter((x) => !x.agree) };
+}
+
+function voterList(list, mark) {
+  const s = el("span", "voters");
+  for (const x of list) {
+    const c = personChip(x.voter_name);
+    c.prepend(el("span", "vote-mark", mark));
+    s.append(c);
+  }
+  return s;
+}
+
+function renderVotes(v) {
+  const c = voteCount(v);
+  const box = el("div", "votes small");
+  if (!c.pool) {
+    box.append(el("span", "muted", "Nobody else can vote on this one – the admin decides."));
+    return box;
+  }
+  const meter = el("span", "vote-meter");
+  meter.setAttribute("role", "img");
+  meter.setAttribute("aria-label", `${c.yes.length} of ${c.need} agree votes needed`);
+  for (let i = 0; i < c.need; i++) meter.append(el("span", "pip" + (i < c.yes.length ? " yes" : "")));
+  box.append(meter, el("span", "vote-text", `${c.yes.length} of ${c.need} agree needed (${c.pool} can vote)`));
+  if (c.yes.length) box.append(voterList(c.yes, "👍"));
+  if (c.no.length) box.append(voterList(c.no, "👎"));
+  return box;
+}
+
+/** On a version the team voted on: who agreed and who didn't. */
+function voteRecord(v) {
+  const box = el("div", "votes small");
+  const yes = v.votes.filter((x) => x.agree), no = v.votes.filter((x) => !x.agree);
+  box.append(el("span", "muted", "Team vote:"));
+  if (yes.length) box.append(voterList(yes, "👍"));
+  if (no.length) box.append(voterList(no, "👎"));
+  return box;
+}
+
+async function castVote(l, v, agree) {
+  try {
+    const result = await must(sb.rpc("vote", { p_id: v.id, p_agree: agree }));
+    if (result === "approved") toast("That made 2/3 – the translation is approved. ✓");
+    else if (result === "rejected") toast("Too many disagree now – that translation is turned down.");
+    await refreshLines([l.id]);
+    scheduleStats();
+  } catch (err) {
+    toast(explain(err), true);
+  }
+}
+
 async function decide(l, v, fn) {
   try {
     await must(sb.rpc(fn, { p_id: v.id }));
@@ -652,6 +735,8 @@ async function withdraw(l, v) {
 // ---------- review: everyone together, or one person at a time ----------
 let reviewQueue = [];     // review_queue rows: who has how many lines waiting
 let reviewQueueReady = true;
+let myVotes = null;       // lines in this project waiting for my vote (null: I don't vote, or no update 5)
+const VOTE_TAB = Symbol("needs my vote"); // the tab key for "Needs your vote" (never a person's name)
 
 async function loadReviewQueue() {
   try {
@@ -660,6 +745,13 @@ async function loadReviewQueue() {
   } catch {
     reviewQueue = [];
     reviewQueueReady = false; // database without update 4: only the "Everyone" list
+  }
+  myVotes = null;
+  if (me.can_review && !me.is_admin) {
+    try {
+      const rows = await must(sb.rpc("need_my_vote"));
+      myVotes = Number(rows.find((r) => Number(r.project_id) === project.id)?.lines || 0);
+    } catch { /* database without update 5 */ }
   }
   renderReviewTabs();
 }
@@ -670,16 +762,18 @@ function renderReviewTabs() {
   if (box.hidden) return;
   box.textContent = "";
   const tab = (key, label, n, title) => {
-    const b = el("button", "rtab" + (view.author === key ? " active" : ""));
+    const on = key === VOTE_TAB ? !!view.unvoted : !view.unvoted && view.author === key;
+    const b = el("button", "rtab" + (on ? " active" : "") + (key === VOTE_TAB ? " rtab-vote" : ""));
     b.type = "button";
     b.setAttribute("role", "tab");
-    b.setAttribute("aria-selected", String(view.author === key));
-    if (key) b.append(avatar(key));
+    b.setAttribute("aria-selected", String(on));
+    if (key && key !== VOTE_TAB) b.append(avatar(key));
     b.append(el("span", "", label), el("span", "rtab-count", fmt(n)));
     if (title) b.title = title;
     b.addEventListener("click", () => pickReviewer(key));
     box.append(b);
   };
+  if (myVotes != null) tab(VOTE_TAB, "🗳 Needs your vote", myVotes, "Translations by others you haven't voted on yet");
   tab(null, "Everyone", sum(stats).review, "Every line waiting for review");
   const rows = reviewQueue.slice();
   if (view.author && !rows.some((r) => r.name === view.author)) rows.push({ name: view.author, lines: 0 });
@@ -691,8 +785,9 @@ function renderReviewTabs() {
 }
 
 function pickReviewer(name) {
-  view = { review: true, author: name };
-  $("#title").textContent = name ? `Waiting for review · ${name}` : "Waiting for review";
+  const unvoted = name === VOTE_TAB;
+  view = { review: true, author: unvoted ? null : name, unvoted };
+  $("#title").textContent = unvoted ? "Waiting for your vote" : name ? `Waiting for review · ${name}` : "Waiting for review";
   renderReviewTabs();
   loadLines();
 }
@@ -749,6 +844,12 @@ function subscribe() {
     .on("postgres_changes", { event: "*", schema: "public", table: "versions", filter }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "notes", filter }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "claims", filter }, () => scheduleStats())
+    .on("postgres_changes", { event: "*", schema: "public", table: "votes", filter }, (payload) => {
+      const row = payload.new && Object.keys(payload.new).length ? payload.new : payload.old || {};
+      const lineId = row.line_id || lines.find((l) => l.versions.some((v) => v.id === row.version_id))?.id;
+      if (lineId && lines.some((l) => l.id === lineId)) refreshLines([lineId], row.voter !== me.id).catch(() => {});
+      scheduleStats();
+    })
     .subscribe();
 }
 
@@ -826,13 +927,15 @@ async function renderHome() {
     return;
   }
   const reviewer = me.can_review || me.is_admin;
-  const [prog, myClaims, waiting, toReview, thisWeek] = await Promise.all([
+  const voter = me.can_review && !me.is_admin;
+  const [prog, myClaims, waiting, toReview, thisWeek, voteRows] = await Promise.all([
     projectProgress(),
     must(sb.from("claims").select("*").eq("user_id", me.id)),
     count(sb.from("versions").select("id", { count: "exact", head: true }).eq("author", me.id).eq("status", "pending")),
     reviewer ? count(sb.from("versions").select("id", { count: "exact", head: true }).eq("status", "pending")
       .or(`author.is.null,author.neq.${me.id}`)) : Promise.resolve(null),
     count(sb.from("versions").select("id", { count: "exact", head: true }).eq("author", me.id).gte("created_at", mondayISO())),
+    voter ? sb.rpc("need_my_vote").then(({ data, error }) => (error ? null : data)) : Promise.resolve(null),
   ]);
   if (current !== "home") return;
   const of = (p) => {
@@ -893,7 +996,15 @@ async function renderHome() {
     tile("You wrote this week", fmt(thisWeek), "translations since Monday"),
     tile("Yours, waiting for review", fmt(waiting), waiting ? "someone else will check them" : "nothing waiting"),
   );
-  if (toReview != null) {
+  if (voteRows) {
+    const here = Number(voteRows.find((r) => Number(r.project_id) === project?.id)?.lines || 0);
+    const all = voteRows.reduce((t, r) => t + Number(r.lines), 0);
+    tiles.append(clickable(tile("Needs your vote", fmt(all), all ? "👍 or 👎 on others' translations · open the list" : "you've voted on everything"), async () => {
+      await goTranslate(project);
+      $("#review-all").click();
+      if (here) pickReviewer(VOTE_TAB);
+    }));
+  } else if (toReview != null) {
     tiles.append(clickable(tile("Waiting for your review", fmt(toReview), "translations by others · open the list"), async () => {
       await goTranslate(project);
       $("#review-all").click();
@@ -918,7 +1029,7 @@ let people = [];          // everyone on the team (me too), in the order they jo
 let team = [];            // everyone else, by name
 
 async function loadPeople() {
-  people = await must(sb.from("profiles").select("id, display_name, is_admin, created_at").order("created_at"));
+  people = await must(sb.from("profiles").select("id, display_name, is_admin, can_review, created_at").order("created_at"));
   team = people.filter((p) => p.id !== me.id).sort((a, b) => a.display_name.localeCompare(b.display_name));
 }
 
@@ -1312,7 +1423,7 @@ async function renderTeam() {
   const t = $("#team-table");
   t.textContent = "";
   const head = el("tr");
-  for (const h of ["Name", "Email", "Status", "Can approve", ""]) head.append(el("th", "", h));
+  for (const h of ["Name", "Email", "Status", "Can vote", ""]) head.append(el("th", "", h));
   t.append(head);
   for (const inv of invites) {
     const p = people.find((x) => x.email === inv.email);
@@ -1325,7 +1436,7 @@ async function renderTeam() {
       try {
         await must(sb.from("invites").update({ can_review: box.checked }).eq("email", inv.email));
         if (p) await must(sb.from("profiles").update({ can_review: box.checked }).eq("id", p.id));
-        toast(`${inv.display_name} ${box.checked ? "can" : "can't"} approve now.`);
+        toast(`${inv.display_name} ${box.checked ? "can" : "can't"} vote on translations now.`);
       } catch (err) { toast(explain(err), true); box.checked = !box.checked; }
     });
     td.append(box);
