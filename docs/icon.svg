@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#b4532a"/>
+  <text x="256" y="330" text-anchor="middle" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"
+        font-size="230" font-weight="700" fill="#ffffff">文A</text>
+</svg>

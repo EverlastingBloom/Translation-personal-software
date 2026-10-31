@@ -174,17 +174,39 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   editor's `.translation.json` and `.notes.json`, so names, review flags and notes come along),
   **export the game file** (only approved lines, or also the waiting ones).
   The exported CSV is byte-for-byte the original except the lines whose translation changed.
-- **Dashboard (admin):** progress at a glance, a chart of approved lines and of translations
-  written per week, and a **weekly report** for any of the last 12 weeks: who wrote, reviewed and
-  commented how much (compared with the week before) and which scenes the work went into.
-  **Copy weekly report** puts it on the clipboard as plain text for the team chat. Below that,
-  each person's work week by week and their contributions so far.
+- **Dashboard (admin):** switch between **Daily** (last 14–90 days) and **Weekly** (last 12 weeks).
+  Figures: % approved, throughput (translations/day, 7-day average), approval pace, a finish
+  forecast at the 14-day pace, the review backlog, median time to a decision (and the 90th
+  percentile), approval rate and active people – each compared with the period before. Charts:
+  translations written with a moving average, approved lines with their trend, the review backlog
+  and the activity mix. A **daily or weekly report** for any day/week (who did what, compared with
+  the one before, and which scenes the work went into) – **Copy report** puts it on the clipboard
+  for the team chat. Below: each person by day/week, and contributions so far.
+- **While translating:** glossary terms are underlined in the original (hover for the agreed
+  translation; set them in *Admin → Glossary*, or import the desktop editor's `.glossary.json`),
+  character names show next to the speaker, and a translation warns about missing codes, glossary
+  terms it doesn't use, or being much longer than the original. **Next untranslated →** (Alt+N)
+  jumps to the next line to do, across scenes. **Compact** fits more lines on screen; **Side by
+  side** puts the original left and the translations right. 🔗 on a line copies a link straight
+  to it. Keyboard: Alt+↓/↑ next/previous line, Alt+A / Alt+D agree / disagree, Ctrl+Enter send,
+  Esc undo then leave the box, / search, ? all shortcuts.
+- **Working together:** a 👎 can say why. Write @Name in a note to mention someone. The 🔔 bell
+  tells you when your translation is approved or turned down, someone disagrees (and why),
+  replies on a line you worked on, or mentions you – click to jump to the line. You see who's
+  online, and who's on which scene right now. A scene, section or the whole project reaching
+  100% gets a small celebration.
+- **Welcome page extras:** the team's latest activity, your recent translations (click to go
+  back to one), your 🔥 streak of days in a row, and the team's weekly goal (set per project in
+  *Admin → Projects*).
+- **Theme and app:** Auto / Light / Dark in the menu under your initials. On a phone, *Add to
+  Home Screen* installs the site as an app with its own icon.
 - **Updating an older database:** a database set up before a feature existed needs its update run
   once, in order (Supabase → SQL Editor → New query → paste → Run):
   `update-1-admin-approves-own.sql`, `update-2-dashboard.sql` (the dashboard), `update-3-welcome-messages.sql` (messages and the
   welcome page's progress), `update-4-replies-review-tabs.sql` (replies, review tabs per person),
   `update-5-votes.sql` (approving by 2/3 vote),
   `update-6-admin-power.sql` (the admin power switch),
+  `update-7-team-features.sql` (notifications, vote reasons, glossary, goals, daily statistics),
   all in `docs/supabase/`.
 
 Set up once (admin):

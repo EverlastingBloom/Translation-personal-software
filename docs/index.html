@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Team Translation</title>
 <link rel="stylesheet" href="style.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#b4532a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Translation">
+<script>try { var t = localStorage.getItem("tt.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}</script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.min.js"></script>
 <script src="config.js"></script>
 <script src="csv.js"></script>
@@ -68,6 +75,19 @@
         <input id="search" type="search" placeholder="Search…" aria-label="Search text, translation, speaker or key" autocomplete="off">
         <kbd>/</kbd>
       </label>
+      <div class="bell-wrap">
+        <button id="bell-btn" class="bell-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="bell-menu" title="Notifications">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>
+          <span id="bell-count" class="badge" hidden></span>
+        </button>
+        <div id="bell-menu" class="menu bell-menu" hidden>
+          <div class="menu-head bell-head">
+            <strong>Notifications</strong>
+            <button id="bell-read" class="link small" type="button">Mark all read</button>
+          </div>
+          <div id="bell-list" class="bell-list"></div>
+        </div>
+      </div>
       <div class="account">
         <button id="me-btn" class="me-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="me-menu">
           <span id="me-avatar" class="avatar"></span>
@@ -84,6 +104,14 @@
             <span>Admin powers</span><span class="switch" aria-hidden="true"></span>
           </button>
           <button id="admin-btn" class="menu-item" type="button" role="menuitem" hidden>Admin panel…</button>
+          <div class="menu-item theme-row" role="group" aria-label="Theme">
+            <span>Theme</span>
+            <span class="seg">
+              <button type="button" data-theme-pick="auto" title="Follow the device">Auto</button>
+              <button type="button" data-theme-pick="light">Light</button>
+              <button type="button" data-theme-pick="dark">Dark</button>
+            </span>
+          </div>
           <button id="logout" class="menu-item" type="button" role="menuitem">Sign out</button>
         </div>
       </div>
@@ -103,16 +131,35 @@
       <div id="clock-value" class="clock-value"></div>
       <div id="clock-since" class="muted small"></div>
     </section>
+    <div id="home-online" class="home-online" hidden></div>
+    <section id="home-goal" class="card goal-card"></section>
     <section id="home-overall" class="card home-overall" hidden></section>
     <div id="home-projects" class="project-cards"></div>
     <div id="home-tiles" class="tiles home-tiles"></div>
-    <section class="card dash-card">
-      <div class="card-head">
-        <h3>Messages</h3>
-        <button class="small" type="button" data-go="inbox">Open messages</button>
+    <div class="home-cols">
+      <section class="card dash-card">
+        <div class="card-head">
+          <h3>Team activity</h3>
+          <span class="muted small">latest first</span>
+        </div>
+        <div id="home-activity" class="feed"></div>
+      </section>
+      <div class="home-side">
+        <section class="card dash-card">
+          <div class="card-head">
+            <h3>Messages</h3>
+            <button class="small" type="button" data-go="inbox">Open messages</button>
+          </div>
+          <div id="home-messages" class="home-messages"></div>
+        </section>
+        <section class="card dash-card">
+          <div class="card-head">
+            <h3>Your recent translations</h3>
+          </div>
+          <div id="home-recent" class="feed"></div>
+        </section>
       </div>
-      <div id="home-messages" class="home-messages"></div>
-    </section>
+    </div>
   </main>
 
   <!-- ======================= direct messages ======================= -->
@@ -154,6 +201,7 @@
         <div>
           <div id="crumb" class="muted small"></div>
           <h2 id="title">Pick a scene on the left</h2>
+          <div id="here-now" class="here-now" hidden></div>
         </div>
         <div class="content-tools">
           <select id="filter" aria-label="Show lines">
@@ -163,6 +211,10 @@
             <option value="untranslated">Untranslated</option>
             <option value="done">Approved</option>
           </select>
+          <button id="next-btn" class="small primary" type="button" title="The next untranslated line (Alt+N)">Next untranslated →</button>
+          <button id="compact-btn" class="small ghost toggle" type="button" aria-pressed="false" title="Smaller cards, more lines on screen">Compact</button>
+          <button id="side-btn" class="small ghost toggle" type="button" aria-pressed="false" title="Original on the left, translations on the right">Side by side</button>
+          <button id="keys-btn" class="small ghost" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">⌨</button>
           <button id="claim-btn" class="ghost" type="button" hidden></button>
         </div>
       </div>
@@ -179,24 +231,42 @@
         <h2 id="dash-title"></h2>
       </div>
       <div class="dash-tools">
-        <label class="small muted" for="dash-week">Week</label>
-        <select id="dash-week"></select>
-        <button id="dash-copy" class="primary" type="button">Copy weekly report</button>
+        <span class="seg" role="group" aria-label="Group by">
+          <button type="button" data-mode="day" aria-pressed="true">Daily</button>
+          <button type="button" data-mode="week" aria-pressed="false">Weekly</button>
+        </span>
+        <select id="dash-range" aria-label="Time range"></select>
+        <select id="dash-period" aria-label="Report for"></select>
+        <button id="dash-copy" class="primary" type="button">Copy report</button>
       </div>
     </div>
+    <p id="dash-note" class="hint" hidden></p>
 
-    <div id="dash-tiles" class="tiles"></div>
+    <div id="dash-tiles" class="tiles kpis"></div>
 
     <div class="dash-grid" id="dash-charts">
       <section class="card dash-card">
+        <h3 id="c-written-title">Translations written</h3>
+        <p class="hint">Every new version, by anyone. The line is the 7-day average (4-week in weekly view).</p>
+        <div class="legend small"><span><i class="sw sw-col"></i><span id="c-written-unit">Per day</span></span><span><i class="sw sw-avg"></i>Moving average</span></div>
+        <div id="chart-written" class="chart"></div>
+      </section>
+      <section class="card dash-card">
         <h3>Lines with an approved translation</h3>
         <p id="chart-progress-sub" class="hint"></p>
+        <div class="legend small"><span><i class="sw sw-line"></i>Approved lines</span><span><i class="sw sw-trend"></i>Trend (last 14 days)</span></div>
         <div id="chart-progress" class="chart"></div>
       </section>
       <section class="card dash-card">
-        <h3>Translations written per week</h3>
-        <p class="hint">Every new version, by anyone on the team.</p>
-        <div id="chart-written" class="chart"></div>
+        <h3>Review backlog</h3>
+        <p class="hint">Versions waiting for a decision at the end of each period – lower is better.</p>
+        <div id="chart-backlog" class="chart"></div>
+      </section>
+      <section class="card dash-card">
+        <h3>Activity mix</h3>
+        <p class="hint">What the team spent its time on.</p>
+        <div class="legend small"><span><i class="sw s1"></i>Written</span><span><i class="sw s2"></i>Reviews &amp; votes</span><span><i class="sw s3"></i>Notes</span></div>
+        <div id="chart-mix" class="chart"></div>
       </section>
     </div>
     <details class="table-view">
@@ -205,7 +275,7 @@
     </details>
 
     <section class="card dash-card">
-      <h3 id="report-title">Weekly report</h3>
+      <h3 id="report-title">Report</h3>
       <p id="report-summary" class="report-summary"></p>
       <div class="report-cols">
         <div>
@@ -221,15 +291,15 @@
 
     <section class="card dash-card">
       <div class="card-head">
-        <h3>Week by week</h3>
+        <h3 id="heat-title">Person by day</h3>
         <select id="heat-measure" aria-label="Show">
           <option value="written">Translations written</option>
           <option value="approved">Their translations approved</option>
-          <option value="reviewed">Reviews done</option>
+          <option value="reviewed">Reviews and votes</option>
           <option value="notes">Notes</option>
         </select>
       </div>
-      <p class="hint">One row per person, the last 12 weeks. The darker the cell, the more that week.</p>
+      <p class="hint" id="heat-hint">One row per person. The darker the cell, the more.</p>
       <div class="table-wrap"><table class="table heat" id="heat-table"></table></div>
     </section>
 
@@ -254,6 +324,7 @@
   <nav class="tabs" role="tablist">
     <button type="button" class="tab active" data-tab="team">Team</button>
     <button type="button" class="tab" data-tab="projects">Projects</button>
+    <button type="button" class="tab" data-tab="glossary">Glossary</button>
   </nav>
 
   <section class="tab-panel" data-panel="team">
@@ -301,6 +372,41 @@
       </div>
     </details>
   </section>
+
+  <section class="tab-panel" data-panel="glossary" hidden>
+    <p class="hint">Agreed translations of names and terms in the open project. Translators see them underlined in the
+      original (hover for the translation) and get a warning when a translation doesn't use them. Character names show
+      next to the speaker.</p>
+    <form id="glossary-form" class="invite-form">
+      <input id="gl-source" placeholder="Term in the original (e.g. Sky Armor)" required maxlength="200">
+      <input id="gl-target" placeholder="Agreed translation" maxlength="200">
+      <input id="gl-note" placeholder="Note (optional)" maxlength="300">
+      <button class="primary" type="submit">Add</button>
+    </form>
+    <div class="dialog-actions gl-files">
+      <label class="small">Import from the desktop editor's <code>.glossary.json</code>
+        <input id="gl-import" type="file" accept=".json"></label>
+      <button id="gl-export" class="small" type="button">⬇ Export as .glossary.json</button>
+    </div>
+    <div class="table-wrap"><table class="table" id="glossary-table"></table></div>
+  </section>
+</dialog>
+
+<dialog id="keys">
+  <div class="dialog-head">
+    <h3>Keyboard shortcuts</h3>
+    <button class="ghost" type="button" data-close>Close</button>
+  </div>
+  <table class="table keys-table">
+    <tr><td><kbd>Alt</kbd> + <kbd>↓</kbd> / <kbd>↑</kbd></td><td>Next / previous line</td></tr>
+    <tr><td><kbd>Alt</kbd> + <kbd>N</kbd></td><td>Next untranslated line (other scenes too)</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>Enter</kbd></td><td>Send your translation and go to the next line</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Undo what you typed; press again to leave the box</td></tr>
+    <tr><td><kbd>Alt</kbd> + <kbd>A</kbd></td><td>👍 Agree with the translation on this line</td></tr>
+    <tr><td><kbd>Alt</kbd> + <kbd>D</kbd></td><td>👎 Disagree (asks why)</td></tr>
+    <tr><td><kbd>/</kbd></td><td>Search</td></tr>
+    <tr><td><kbd>?</kbd></td><td>This list</td></tr>
+  </table>
 </dialog>
 
 <div id="update-bar" class="update-bar" role="status" hidden>

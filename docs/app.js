@@ -112,6 +112,70 @@ function withTags(text) {
   return frag;
 }
 
+// ---------- glossary: agreed terms, hinted in the original and checked in translations ----------
+let glossary = [];        // this project's terms: {id, source, target, note}
+let glossaryRe = null;    // finds any term (whole words, any case)
+
+async function loadGlossary() {
+  try {
+    glossary = await must(sb.from("glossary").select("*").eq("project_id", project.id).order("source"));
+  } catch {
+    glossary = []; // database without update 7
+  }
+  const terms = glossary.map((g) => g.source.trim()).filter(Boolean).sort((a, b) => b.length - a.length)
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  glossaryRe = terms.length ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${terms.join("|")})(?![\\p{L}\\p{N}])`, "giu") : null;
+}
+
+function termOf(text) {
+  const t = (text || "").trim().toLowerCase();
+  return glossary.find((g) => g.source.trim().toLowerCase() === t);
+}
+
+/** The original with its codes marked (withTags) and its glossary terms underlined, with the agreed translation on hover. */
+function richText(text) {
+  const frag = withTags(text);
+  if (!glossaryRe) return frag;
+  for (const node of [...frag.childNodes]) {
+    if (node.nodeType !== Node.TEXT_NODE) continue;
+    const s = node.textContent;
+    const parts = [];
+    let last = 0;
+    for (const m of s.matchAll(glossaryRe)) {
+      const g = termOf(m[0]);
+      const mark = el("mark", "term", m[0]);
+      mark.tabIndex = 0;
+      mark.title = `Glossary: ${g?.source} → ${g?.target || "(keep as it is)"}${g?.note ? ` · ${g.note}` : ""}`;
+      parts.push(s.slice(last, m.index), mark);
+      last = m.index + m[0].length;
+    }
+    if (!parts.length) continue;
+    parts.push(s.slice(last));
+    node.replaceWith(...parts);
+  }
+  return frag;
+}
+
+/** Glossary terms in the original whose agreed translation the text doesn't use. */
+function glossaryProblem(source, text) {
+  if (!glossaryRe || !text.trim()) return "";
+  const lower = text.toLowerCase();
+  const missing = [...new Set([...source.matchAll(glossaryRe)].map((m) => termOf(m[0])))]
+    .filter((g) => g && g.target && !lower.includes(g.target.toLowerCase()));
+  return missing.length ? `Glossary: ${missing.map((g) => `${g.source} → ${g.target}`).join(", ")}` : "";
+}
+
+/** Game text boxes are small: warn when a translation is much longer than the original. */
+function lengthProblem(source, text) {
+  const a = source.trim().length, b = text.trim().length;
+  if (a < 8 || !b) return "";
+  return b > a * 1.5 && b - a > 15 ? `${Math.round(100 * (b - a) / a)}% longer than the original` : "";
+}
+
+function problemsOf(source, text) {
+  return [tagProblem(source, text), glossaryProblem(source, text), lengthProblem(source, text)].filter(Boolean);
+}
+
 /** The admin with their admin powers on (they can switch them off and act like everyone else). */
 function actingAdmin() { return !!me?.is_admin && me.admin_active !== false; }
 
@@ -221,10 +285,11 @@ async function start() {
   renderPower();
   setView("home", false);
   showOnly("#app");
-  await Promise.all([loadProjects(), loadInbox()]);
+  await Promise.all([loadProjects(), loadInbox(), loadNotifications()]);
   renderPower(); // the avatar's colour needs the team
   subscribeInbox();
-  setView("home");
+  startPresence();
+  if (!(await openFromHash())) setView("home");
 }
 
 // ---------- pages: welcome, translating, dashboard, messages ----------
@@ -241,6 +306,7 @@ function setView(name, render = true) {
   $("#app").dataset.view = name;
   for (const b of $$(".nav [data-go]")) b.classList.toggle("active", b.dataset.go === name);
   document.title = name === "translate" || name === "dash" ? `${project.name} · Team Translation` : "Team Translation";
+  trackPresence();
   if (!render) return;
   if (name === "home") renderHome().catch((err) => toast(explain(err), true));
   if (name === "dash") loadDash().catch((err) => toast(explain(err), true));
@@ -364,7 +430,7 @@ async function openProject(p) {
   if (current === "translate" || current === "dash") document.title = `${p.name} · Team Translation`;
   drafts = {};
   subscribe();
-  await loadStats();
+  await Promise.all([loadStats(), loadGlossary()]);
   if (current === "dash") loadDash().catch((err) => toast(explain(err), true));
   const groups = [...new Set(stats.map((s) => s.grp))];
   const savedView = (() => { try { return JSON.parse(localGet("view." + p.id) || "null"); } catch { return null; } })();
@@ -374,10 +440,50 @@ async function openProject(p) {
   if (first) await openScene(first.grp, first.scene);
 }
 
+let statsOf = null;       // which project `stats` belongs to (milestones only compare within one)
+
 async function loadStats() {
+  const before = statsOf === project.id ? stats : null;
   stats = await must(sb.rpc("scene_stats", { p_project: project.id }));
+  statsOf = project.id;
   claims = await must(sb.from("claims").select("*").eq("project_id", project.id));
   renderProgress();
+  if (before) celebrateMilestones(before, stats);
+}
+
+// ---------- milestones: a scene, a section or the whole project reaching 100% ----------
+function celebrateMilestones(before, after) {
+  const done = (rows) => rows.length > 0 && rows.every((s) => sceneState(s) === "complete");
+  const wins = [];
+  if (!done(before) && done(after)) wins.push(`the whole of ${project.name}`);
+  else {
+    for (const g of new Set(after.map((s) => s.grp))) {
+      if (!done(before.filter((s) => s.grp === g)) && done(after.filter((s) => s.grp === g))) wins.push(g || "this section");
+    }
+    if (!wins.length) {
+      for (const s of after) {
+        const was = before.find((x) => x.grp === s.grp && x.scene === s.scene);
+        if (was && sceneState(was) !== "complete" && sceneState(s) === "complete") wins.push(s.scene || "a scene");
+      }
+    }
+  }
+  if (wins.length) celebrate(`🎉 ${wins.slice(0, 3).join(", ")}${wins.length > 3 ? " and more" : ""} – complete!`);
+}
+
+function celebrate(text) {
+  toast(text);
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const burst = el("div", "confetti");
+  burst.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 18; i++) {
+    const bit = el("span", "", ["🎉", "✨", "⭐", "🎊"][i % 4]);
+    bit.style.setProperty("--x", `${Math.round(Math.random() * 360 - 180)}px`);
+    bit.style.setProperty("--y", `${Math.round(-120 - Math.random() * 160)}px`);
+    bit.style.setProperty("--r", `${Math.round(Math.random() * 720 - 360)}deg`);
+    burst.append(bit);
+  }
+  document.body.append(burst);
+  setTimeout(() => burst.remove(), 1600);
 }
 
 function sum(rows) {
@@ -444,7 +550,14 @@ function renderScenes() {
     meta.append(st === "complete" ? el("span", "done", "✓ Complete") : el("span", "", `${s.done}/${s.total}`));
     if (Number(s.review)) meta.append(el("span", "flag", `⚑ ${s.review}`));
     for (const c of claims.filter((c) => c.grp === s.grp && c.scene === s.scene)) meta.append(el("span", "claimed", `✋ ${c.user_name}`));
-    b.append(meta);
+    for (const u of presenceIn(s)) meta.append(avatar(u.name));
+    const bar = el("span", "scene-bar");
+    bar.setAttribute("aria-hidden", "true");
+    const d = el("i", "done"), r = el("i", "review");
+    d.style.width = `${100 * s.done / s.total}%`;
+    r.style.width = `${100 * s.review / s.total}%`;
+    bar.append(d, r);
+    b.append(meta, bar);
     b.addEventListener("click", () => openScene(s.grp, s.scene));
     nav.append(b);
   }
@@ -460,6 +573,8 @@ async function openScene(grp, scene) {
   $("#crumb").textContent = grp || "";
   $("#title").textContent = scene || "(no scene)";
   renderClaim();
+  trackPresence();
+  renderHereNow();
   await loadLines();
 }
 
@@ -486,8 +601,8 @@ async function loadLines() {
   }
   box.textContent = "";
   if (!lines.length) {
-    box.append(el("p", "empty", view.search ? "Nothing found."
-      : view.review ? (view.unvoted ? "Nothing is waiting for your vote. 🎉" : view.author ? `Nothing of ${view.author}'s is waiting for review.` : "Nothing is waiting for review.")
+    box.append(emptyState(view.search ? "Nothing found."
+      : view.review ? (view.unvoted ? "Nothing is waiting for your vote. 🎉" : view.author ? `Nothing of ${view.author}'s is waiting for review.` : "Nothing is waiting for review. 🎉")
       : $("#filter").value ? "No lines like that here." : "This scene is empty."));
     return;
   }
@@ -510,14 +625,43 @@ async function refreshLines(ids, flash = false) {
   }
 }
 
+/** An empty list that says what to do next, instead of just "nothing here". */
+function emptyState(text) {
+  const box = el("div", "empty empty-state");
+  box.append(el("p", "", text));
+  const todo = stats.find((s) => Number(s.untranslated));
+  if (todo) {
+    const go = el("button", "primary small", `Next untranslated: ${todo.scene || "a scene"} →`);
+    go.type = "button";
+    go.addEventListener("click", goNextTodo);
+    box.append(go);
+  } else if (sum(stats).review && !view.review) {
+    const go = el("button", "small", "⚑ Review what's waiting");
+    go.type = "button";
+    go.addEventListener("click", () => $("#review-all").click());
+    box.append(go);
+  }
+  return box;
+}
+
 function renderLine(l) {
   const st = lineState(l);
   const card = el("article", `line is-${st}`);
   card.dataset.id = l.id;
+  card.tabIndex = -1; // keyboard moves can land on a line without a text box
+  const left = el("div", "line-left"), right = el("div", "line-right"); // side by side in that view
 
   const head = el("div", "line-head");
   head.append(el("span", "", `#${l.idx + 1}`));
-  if (l.speaker) head.append(el("span", "speaker", l.speaker));
+  if (l.speaker) {
+    head.append(el("span", "speaker", l.speaker));
+    const name = termOf(l.speaker);
+    if (name?.target && name.target !== l.speaker) {
+      const t = el("span", "speaker-term", `→ ${name.target}`);
+      t.title = `Glossary${name.note ? `: ${name.note}` : ""}`;
+      head.append(t);
+    }
+  }
   if (l.key) head.append(el("span", "", l.key));
   if (view.search || view.review) head.append(el("span", "", `${l.grp} › ${l.scene}`));
   const waitingFrom = [...new Set(l.versions.filter((v) => v.status === "pending").map((v) => v.author_name || "?"))];
@@ -527,12 +671,19 @@ function renderLine(l) {
     for (const n of waitingFrom) flags.append(personChip(n));
     head.append(flags);
   }
-  card.append(head);
+  const link = el("button", "link-btn ghost small", "🔗");
+  link.type = "button";
+  link.title = "Copy a link to this line";
+  link.setAttribute("aria-label", "Copy a link to this line");
+  link.addEventListener("click", () => copyLineLink(l));
+  head.append(link);
+  left.append(head);
 
   const src = el("p", "source");
-  src.append(withTags(l.source));
-  card.append(src);
-  if (l.reference) card.append(el("p", "reference", l.reference));
+  src.append(richText(l.source));
+  left.append(src);
+  if (l.reference) left.append(el("p", "reference", l.reference));
+  card.append(left, right);
 
   const approved = l.versions.find((v) => v.status === "approved");
   const main = el("div", "main" + (approved ? "" : " none"));
@@ -545,13 +696,13 @@ function renderLine(l) {
   } else {
     main.append(el("div", "who", "No approved translation yet"));
   }
-  card.append(main);
+  right.append(main);
 
   const pending = l.versions.filter((v) => v.status === "pending");
   if (pending.length) {
     const list = el("div", "versions");
     for (const v of pending) list.append(renderVersion(l, v));
-    card.append(list);
+    right.append(list);
   }
   const old = l.versions.filter((v) => v.status === "rejected" || v.status === "superseded");
   if (old.length) {
@@ -560,11 +711,10 @@ function renderLine(l) {
     const list = el("div", "versions");
     for (const v of old.slice().reverse()) list.append(renderVersion(l, v));
     d.append(list);
-    card.append(d);
+    right.append(d);
   }
 
-  card.append(renderEditor(l, approved));
-  card.append(renderNotes(l));
+  right.append(renderEditor(l, approved), renderNotes(l));
   return card;
 }
 
@@ -577,8 +727,7 @@ function renderVersion(l, v) {
   const who = el("div", "who muted");
   who.append(el("span", `chip ${v.status}`, label), " ", personChip(v.author_name || "?"), ` · ${timeAgo(v.created_at)}`);
   if (v.decided_by_name && v.status !== "pending") who.append(` · decided by ${v.decided_by_name}`);
-  const problem = tagProblem(l.source, v.text);
-  if (problem) who.append(el("span", "tag-warn", ` · ${problem}`));
+  for (const problem of problemsOf(l.source, v.text)) who.append(el("span", "tag-warn", ` · ${problem}`));
   body.append(who);
   box.append(body);
 
@@ -607,7 +756,7 @@ function renderVersion(l, v) {
         b.type = "button";
         b.setAttribute("aria-pressed", String(pressed));
         b.title = pressed ? "Click to take your vote back" : agree ? "This translation is good" : "This translation isn't right yet";
-        b.addEventListener("click", () => castVote(l, v, pressed ? null : agree));
+        b.addEventListener("click", () => (!pressed && !agree ? askReason(l, v, actions) : castVote(l, v, pressed ? null : agree)));
         actions.append(b);
       }
     }
@@ -654,13 +803,17 @@ function renderEditor(l, approved) {
   const send = el("button", "primary small", mine ? "Update my suggestion" : "Send for review");
   send.type = "button";
   const check = () => {
-    warn.textContent = ta.value.trim() ? tagProblem(l.source, ta.value) : "";
+    warn.textContent = ta.value.trim() ? problemsOf(l.source, ta.value).join(" · ") : "";
     send.disabled = !ta.value.trim() || (mine && ta.value === mine.text);
   };
   ta.addEventListener("input", () => { drafts[l.id] = ta.value; check(); });
   ta.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!send.disabled) submit(l, ta.value, true); }
-    if (e.key === "Escape") { delete drafts[l.id]; ta.value = mine ? mine.text : ""; check(); }
+    if (e.key === "Escape") {
+      const saved = mine ? mine.text : "";
+      if (ta.value !== saved) { delete drafts[l.id]; ta.value = saved; check(); } // first Esc: undo the typing
+      else ta.blur();                                                             // then: leave the box
+    }
   });
   send.addEventListener("click", () => submit(l, ta.value, false));
   check();
@@ -674,7 +827,9 @@ function renderNotes(l) {
   const box = el("div", "notes");
   for (const n of l.notes) {
     const row = el("div", "note");
-    row.append(el("strong", "", n.author_name || "?"), el("span", "note-body", n.body), el("span", "muted small", timeAgo(n.created_at)));
+    const text = el("span", "note-body");
+    text.append(withMentions(n.body));
+    row.append(el("strong", "", n.author_name || "?"), text, el("span", "muted small", timeAgo(n.created_at)));
     if (n.author === me.id || actingAdmin()) {
       const del = el("button", "link small", "delete");
       del.type = "button";
@@ -687,11 +842,11 @@ function renderNotes(l) {
   }
   const form = el("form", "note-form");
   const input = el("input");
-  input.placeholder = l.notes.length ? "Reply…" : "Add a note for the team…";
+  input.placeholder = l.notes.length ? "Reply… (@name to mention someone)" : "Add a note for the team… (@name to mention someone)";
   input.maxLength = 4000;
   const add = el("button", "small", "Add note");
   add.type = "submit";
-  form.append(input, add);
+  form.append(input, add, mentionPicker(input));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = input.value.trim();
@@ -757,6 +912,7 @@ function voterList(list, mark) {
     const c = personChip(x.voter_name);
     c.prepend(el("span", "vote-mark", mark));
     s.append(c);
+    if (x.reason) s.append(el("span", "vote-reason", `“${x.reason}”`));
   }
   return s;
 }
@@ -794,16 +950,199 @@ function voteRecord(v) {
   return box;
 }
 
-async function castVote(l, v, agree) {
+async function castVote(l, v, agree, reason = "") {
   try {
-    const result = await must(sb.rpc("vote", { p_id: v.id, p_agree: agree }));
+    const args = { p_id: v.id, p_agree: agree };
+    if (reason) args.p_reason = reason; // only sent when given, so a database without update 7 still takes votes
+    const result = await must(sb.rpc("vote", args));
     if (result === "approved") toast("That made 2/3 – the translation is approved. ✓");
     else if (result === "rejected") toast("Too many disagree now – that translation is turned down.");
     await refreshLines([l.id]);
     scheduleStats();
+    if (currentLineId === l.id) focusLine(l.id, false, false);
   } catch (err) {
     toast(explain(err), true);
   }
+}
+
+/** 👎 asks for a reason first (optional), so the translator knows what to fix. */
+function askReason(l, v, actions) {
+  actions.textContent = "";
+  const form = el("form", "reason-form");
+  const input = el("input");
+  input.placeholder = "Why? (optional – helps them fix it)";
+  input.maxLength = 500;
+  const send = el("button", "small vote-btn", "👎 Disagree");
+  send.type = "submit";
+  const cancel = el("button", "small ghost", "Cancel");
+  cancel.type = "button";
+  form.append(input, send, cancel);
+  form.addEventListener("submit", (e) => { e.preventDefault(); castVote(l, v, false, input.value.trim()); });
+  const back = () => { const card = $(`.line[data-id="${l.id}"]`); if (card) card.replaceWith(renderLine(l)); };
+  cancel.addEventListener("click", back);
+  input.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); back(); } });
+  actions.append(form);
+  input.focus();
+}
+
+// ---------- @mentions in notes ----------
+/** A note with @Name of teammates highlighted (yours stands out). */
+function withMentions(body) {
+  const frag = document.createDocumentFragment();
+  const names = people.map((p) => p.display_name).filter(Boolean).sort((a, b) => b.length - a.length)
+    .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!names.length) { frag.append(body); return frag; }
+  const re = new RegExp(`@(${names.join("|")})(?![\\p{L}\\p{N}])`, "giu");
+  let last = 0;
+  for (const m of body.matchAll(re)) {
+    const mine = m[1].toLowerCase() === me.display_name.toLowerCase();
+    frag.append(body.slice(last, m.index), el("span", "mention" + (mine ? " me" : ""), m[0]));
+    last = m.index + m[0].length;
+  }
+  frag.append(body.slice(last));
+  return frag;
+}
+
+/** Typing "@" in a note offers the teammates' names. */
+function mentionPicker(input) {
+  const list = el("div", "mention-list");
+  list.hidden = true;
+  const word = () => /@([^\s@]*)$/u.exec(input.value.slice(0, input.selectionStart ?? input.value.length));
+  const pick = (name) => {
+    const m = word();
+    if (!m) return;
+    const end = input.selectionStart ?? input.value.length;
+    input.value = `${input.value.slice(0, end - m[0].length)}@${name} ${input.value.slice(end)}`;
+    list.hidden = true;
+    input.focus();
+  };
+  input.addEventListener("input", () => {
+    const m = word();
+    const found = m ? team.filter((p) => p.display_name.toLowerCase().startsWith(m[1].toLowerCase())).slice(0, 6) : [];
+    list.textContent = "";
+    for (const p of found) {
+      const b = el("button", "mention-option");
+      b.type = "button";
+      b.dataset.name = p.display_name;
+      b.append(avatar(p.display_name), p.display_name);
+      b.addEventListener("mousedown", (e) => { e.preventDefault(); pick(p.display_name); });
+      list.append(b);
+    }
+    list.hidden = !found.length;
+  });
+  input.addEventListener("keydown", (e) => {
+    if (list.hidden) return;
+    if (e.key === "Tab" || (e.key === "Enter" && list.firstChild)) { e.preventDefault(); pick(list.firstChild.dataset.name); }
+    if (e.key === "Escape") list.hidden = true;
+  });
+  input.addEventListener("blur", () => setTimeout(() => { list.hidden = true; }, 150));
+  return list;
+}
+
+// ---------- moving around: links to a line, the next thing to do, the keyboard ----------
+let currentLineId = null; // the line you're working on (where the focus is)
+
+function lineLink(l) { return `${siteUrl()}#line=${project.id}:${l.id}`; }
+
+async function copyLineLink(l) {
+  try {
+    await navigator.clipboard.writeText(lineLink(l));
+    toast("Link to this line copied – paste it in a message or note.");
+  } catch {
+    prompt("Copy this link:", lineLink(l));
+  }
+}
+
+/** Opens a line wherever it is: its project, its scene, scrolled to and flashing. */
+async function goLine(p, lineId) {
+  if (!p) { toast("That line's project isn't on the site any more."); return; }
+  if (project?.id !== p.id) await openProject(p);
+  const [l] = await must(sb.rpc("get_lines", { p_project: p.id, p_ids: [lineId], p_limit: 1 }));
+  if (!l) { toast("That line doesn't exist any more."); return; }
+  setView("translate");
+  $("#filter").value = "";
+  await openScene(l.grp, l.scene);
+  focusLine(lineId, true);
+}
+
+/** A link like …#line=1:234 opens that line. */
+async function openFromHash() {
+  const m = /^#line=(\d+):(\d+)$/.exec(location.hash);
+  if (!m || !me) return false;
+  history.replaceState(null, "", location.pathname + location.search);
+  await goLine(projects.find((x) => x.id === Number(m[1])), Number(m[2]));
+  return true;
+}
+
+function focusLine(id, flash = false, scroll = true) {
+  const card = $(`.line[data-id="${id}"]`);
+  if (!card) return;
+  currentLineId = Number(id);
+  if (scroll) card.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (flash) { card.classList.remove("flash"); void card.offsetWidth; card.classList.add("flash"); }
+  (card.querySelector("textarea") || card).focus({ preventScroll: true });
+}
+
+function moveLine(step) {
+  const cards = $$("#lines .line");
+  if (!cards.length) return;
+  const i = cards.findIndex((c) => Number(c.dataset.id) === currentLineId);
+  const next = cards[i < 0 ? 0 : Math.min(cards.length - 1, Math.max(0, i + step))];
+  focusLine(next.dataset.id);
+}
+
+/** The next untranslated line: further down this scene, else the next scene that has some. */
+async function goNextTodo() {
+  if (!project) return;
+  const cards = $$("#lines .line");
+  const i = cards.findIndex((c) => Number(c.dataset.id) === currentLineId);
+  const here = !view?.search && !view?.review && cards.slice(i + 1).find((c) => c.classList.contains("is-untranslated"));
+  if (here) { focusLine(here.dataset.id); return; }
+  const at = view?.scene != null ? stats.findIndex((s) => s.grp === view.grp && s.scene === view.scene) : -1;
+  const order = [...stats.slice(at + 1), ...stats.slice(0, Math.max(at, 0))];
+  const s = order.find((x) => Number(x.untranslated));
+  if (!s) { toast("Nothing left untranslated – every line has a translation. 🎉"); return; }
+  setView("translate");
+  $("#filter").value = "";
+  await openScene(s.grp, s.scene);
+  const first = $("#lines .line.is-untranslated");
+  if (first) focusLine(first.dataset.id);
+}
+
+/** Alt+A / Alt+D: vote on the line you're on (the first version there you can vote on). */
+function voteFocused(agree) {
+  const l = lines.find((x) => x.id === currentLineId);
+  const v = l?.versions.find((x) => x.status === "pending" && canVoteOn(x) && (!view.author || x.author_name === view.author));
+  if (!v) { toast("Nothing on this line you can vote on."); return; }
+  if (agree) { castVote(l, v, true); return; }
+  const actions = $(`.line[data-id="${l.id}"] .version.pending .version-actions`);
+  if (actions) askReason(l, v, actions);
+}
+
+function onShortcut(e) {
+  if (current !== "translate" || e.ctrlKey || e.metaKey) return;
+  if (e.altKey) {
+    const act = { ArrowDown: () => moveLine(1), ArrowUp: () => moveLine(-1), KeyN: goNextTodo,
+                  KeyA: () => voteFocused(true), KeyD: () => voteFocused(false) }[e.code];
+    if (act) { e.preventDefault(); act(); }
+    return;
+  }
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
+  if (e.key === "?" && !typing) { e.preventDefault(); $("#keys").showModal(); }
+}
+
+// ---------- how the lines look: compact, side by side ----------
+function applyLineLook() {
+  const compact = localGet("compact") === "1", side = localGet("side") === "1";
+  $("#lines").classList.toggle("compact", compact);
+  $("#lines").classList.toggle("side", side);
+  $("#compact-btn").setAttribute("aria-pressed", String(compact));
+  $("#side-btn").setAttribute("aria-pressed", String(side));
+}
+
+function toggleLook(key) {
+  localSet(key, localGet(key) === "1" ? "0" : "1");
+  applyLineLook();
 }
 
 async function decide(l, v, fn) {
@@ -1057,6 +1396,10 @@ async function renderHome() {
   $("#home-date").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   tickHome();
   renderHomeMessages();
+  renderOnline();
+  renderActivity().catch(() => {});
+  renderRecent().catch(() => {});
+  renderGoal().catch(() => {});
   const cards = $("#home-projects");
   if (!projects.length) {
     $("#home-overall").hidden = true;
@@ -1551,6 +1894,284 @@ async function receive(m) {
   if (current === "home") renderHomeMessages();
 }
 
+// ---------- notifications: approved, turned down, a 👎 and why, replies, @mentions ----------
+let notes4me = [];        // my latest notifications, newest first
+let notesReady = false;   // false: the database lacks update 7
+let notesChannel = null;
+
+const NOTE_TEXT = {
+  approved: (n) => `${n.actor_name === "Team vote" ? "The team approved" : `${n.actor_name} approved`} your translation`,
+  rejected: (n) => `${n.actor_name === "Team vote" ? "The team turned down" : `${n.actor_name} turned down`} your translation`,
+  vote: (n) => `${n.actor_name} disagreed`,
+  note: (n) => `${n.actor_name} wrote a note on a line you worked on`,
+  mention: (n) => `${n.actor_name} mentioned you`,
+};
+const NOTE_ICON = { approved: "✓", rejected: "✗", vote: "👎", note: "💬", mention: "@" };
+
+async function loadNotifications() {
+  try {
+    notes4me = await must(sb.from("notifications").select("*").order("created_at", { ascending: false }).limit(50));
+    notesReady = true;
+  } catch {
+    notes4me = [];
+    notesReady = false;
+  }
+  $(".bell-wrap").hidden = !notesReady;
+  renderBell();
+  if (notesChannel) sb.removeChannel(notesChannel);
+  notesChannel = null;
+  if (!notesReady) return;
+  notesChannel = sb.channel(`notifications-${me.id}`)
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${me.id}` }, (payload) => {
+      const n = payload.new;
+      if (notes4me.some((x) => x.id === n.id)) return;
+      notes4me.unshift(n);
+      renderBell();
+      if (current !== "inbox") toast(`${NOTE_ICON[n.kind] || "🔔"} ${NOTE_TEXT[n.kind]?.(n) || "New notification"}`);
+    })
+    .subscribe();
+}
+
+function renderBell() {
+  const unread = notes4me.filter((n) => !n.read_at).length;
+  $("#bell-count").textContent = unread > 99 ? "99+" : String(unread);
+  $("#bell-count").hidden = !unread;
+  $("#bell-btn").title = unread ? `${unread} new notification${unread === 1 ? "" : "s"}` : "Notifications";
+  const list = $("#bell-list");
+  list.textContent = "";
+  if (!notes4me.length) { list.append(el("p", "hint bell-empty", "Nothing yet. You'll hear here when your translations are decided, when someone disagrees, replies or mentions you.")); return; }
+  for (const n of notes4me.slice(0, 30)) {
+    const b = el("button", "bell-item" + (n.read_at ? "" : " unread"));
+    b.type = "button";
+    const text = el("span", "bell-text");
+    text.append(el("span", "", NOTE_TEXT[n.kind]?.(n) || n.kind), el("span", "bell-body", n.body), el("span", "muted small", timeAgo(n.created_at)));
+    b.append(el("span", `bell-icon k-${n.kind}`, NOTE_ICON[n.kind] || "•"), text);
+    b.addEventListener("click", async () => {
+      toggleBell(false);
+      markNotificationsRead([n.id]);
+      if (n.line_id) await goLine(projects.find((p) => p.id === Number(n.project_id)), Number(n.line_id));
+    });
+    list.append(b);
+  }
+}
+
+function markNotificationsRead(ids = null) {
+  const now = new Date().toISOString();
+  for (const n of notes4me) if (!n.read_at && (!ids || ids.includes(n.id))) n.read_at = now;
+  renderBell();
+  sb.rpc("mark_notifications_read", ids ? { p_ids: ids } : {}).then(() => {}, () => {});
+}
+
+function toggleBell(open = $("#bell-menu").hidden) {
+  $("#bell-menu").hidden = !open;
+  $("#bell-btn").setAttribute("aria-expanded", String(open));
+  if (open) toggleMenu(false);
+}
+
+// ---------- who's here right now (live presence) ----------
+let presenceChannel = null;
+let online = [];          // everyone else online: {id, name, project, grp, scene, page}
+
+function trackPresence() {
+  if (!presenceChannel || !me) return;
+  presenceChannel.track({ id: me.id, name: me.display_name, page: current, project: project?.id ?? null,
+                          grp: view?.scene != null ? view.grp : null, scene: view?.scene ?? null }).catch?.(() => {});
+}
+
+function startPresence() {
+  if (presenceChannel) sb.removeChannel(presenceChannel);
+  presenceChannel = sb.channel("presence-team", { config: { presence: { key: me.id } } });
+  presenceChannel.on("presence", { event: "sync" }, () => {
+    const state = presenceChannel.presenceState ? presenceChannel.presenceState() : {};
+    online = Object.values(state).map((list) => list[list.length - 1]).filter((u) => u && u.id !== me.id);
+    renderPresence();
+  }).subscribe((status) => { if (status === "SUBSCRIBED") trackPresence(); });
+}
+
+function presenceIn(s) {
+  return online.filter((u) => u.project === project?.id && u.grp === s.grp && u.scene === s.scene);
+}
+
+function renderPresence() {
+  if (current === "translate") {
+    renderScenes();
+    renderHereNow();
+  }
+  if (current === "home") renderOnline();
+}
+
+function renderHereNow() {
+  const box = $("#here-now");
+  box.textContent = "";
+  const here = view?.scene != null ? presenceIn(view) : [];
+  box.hidden = !here.length;
+  if (!here.length) return;
+  box.append(el("span", "muted small", "Here now:"));
+  for (const u of here) box.append(personChip(u.name));
+}
+
+function renderOnline() {
+  const box = $("#home-online");
+  box.textContent = "";
+  box.hidden = !online.length;
+  if (!online.length) return;
+  box.append(el("span", "online-dot"), el("span", "muted small", "Online now:"));
+  for (const u of online) {
+    const c = personChip(u.name);
+    const where = u.page === "translate" && u.scene ? `on ${u.scene}` : u.page === "inbox" ? "in Messages" : u.page === "dash" ? "on the dashboard" : "on the welcome page";
+    c.title = `${u.name} – ${where}`;
+    box.append(c);
+  }
+}
+
+// ---------- welcome: team activity, your recent translations, streak and weekly goal ----------
+const ACT_TEXT = {
+  wrote: "translated", approved: "approved", rejected: "turned down", superseded: "approved", note: "wrote a note on",
+  agree: "agreed with", disagree: "disagreed with",
+};
+
+function feedItem(icon, who, text, where, at, onClick) {
+  const b = el("button", "feed-item");
+  b.type = "button";
+  const t = el("span", "feed-text");
+  const line = el("span");
+  line.append(who ? personChip(who) : "", ` ${text}`);
+  t.append(line);
+  if (where) t.append(el("span", "feed-where muted small", where));
+  b.append(el("span", "feed-icon", icon), t, el("span", "muted small feed-at", timeAgo(at)));
+  if (onClick) b.addEventListener("click", onClick);
+  return b;
+}
+
+async function renderActivity() {
+  const box = $("#home-activity");
+  let rows;
+  try {
+    rows = await must(sb.rpc("recent_activity", { p_limit: 12 }));
+  } catch {
+    box.textContent = "";
+    box.append(el("p", "hint", "The activity feed needs a database update (update-7-team-features.sql)."));
+    return;
+  }
+  box.textContent = "";
+  if (!rows.length) { box.append(el("p", "hint", "Nothing yet – the team's work will show up here.")); return; }
+  const icons = { wrote: "✎", approved: "✓", superseded: "✓", rejected: "✗", note: "💬", agree: "👍", disagree: "👎" };
+  for (const r of rows) {
+    const who = r.who === "Team vote" ? "" : r.who;
+    const text = r.who === "Team vote" ? `The team vote ${ACT_TEXT[r.kind]} a translation` : `${ACT_TEXT[r.kind] || r.kind} a line`;
+    const p = projects.find((x) => x.id === Number(r.project_id));
+    box.append(feedItem(icons[r.kind] || "•", who, text, `${projects.length > 1 && p ? `${p.name} · ` : ""}${r.scene}${r.body ? ` · “${r.body}”` : ""}`,
+      r.at, () => goLine(p, Number(r.line_id))));
+  }
+}
+
+async function renderRecent() {
+  const box = $("#home-recent");
+  const rows = await must(sb.from("versions").select("id, text, status, created_at, line_id, project_id, lines(idx, grp, scene)")
+    .eq("author", me.id).order("created_at", { ascending: false }).limit(8)).catch(() => []);
+  box.textContent = "";
+  if (!rows.length) { box.append(el("p", "hint", "Your translations will show up here, so you can jump back to them.")); return; }
+  const icon = { pending: "⚑", approved: "✓", rejected: "✗", superseded: "↻" };
+  for (const r of rows) {
+    const p = projects.find((x) => x.id === Number(r.project_id));
+    box.append(feedItem(icon[r.status] || "•", "", `“${r.text.length > 60 ? r.text.slice(0, 60) + "…" : r.text}”`,
+      `${r.lines ? `${r.lines.scene} · line ${r.lines.idx + 1}` : ""} · ${{ pending: "waiting for review", approved: "approved", rejected: "not used", superseded: "replaced" }[r.status]}`,
+      r.created_at, () => goLine(p, Number(r.line_id))));
+  }
+}
+
+/** Days in a row (up to today, or yesterday if you haven't worked yet today) with at least one translation. */
+async function myStreak() {
+  const since = new Date(Date.now() - 90 * 86400e3).toISOString();
+  const rows = await must(sb.from("versions").select("created_at").eq("author", me.id).gte("created_at", since)).catch(() => []);
+  const days = new Set(rows.map((r) => new Date(r.created_at).toLocaleDateString("sv")));
+  const d = new Date();
+  if (!days.has(d.toLocaleDateString("sv"))) d.setDate(d.getDate() - 1);
+  let n = 0;
+  while (days.has(d.toLocaleDateString("sv"))) { n++; d.setDate(d.getDate() - 1); }
+  return { n, today: days.has(new Date().toLocaleDateString("sv")) };
+}
+
+async function renderGoal() {
+  const box = $("#home-goal");
+  const p = project || projects[0];
+  const [streak, week] = await Promise.all([
+    myStreak(),
+    p ? count(sb.from("versions").select("id", { count: "exact", head: true }).eq("project_id", p.id).gte("created_at", mondayISO())).catch(() => 0) : 0,
+  ]);
+  box.textContent = "";
+  const s = el("div", "goal-item");
+  s.append(el("span", "goal-big", streak.n ? `🔥 ${streak.n}` : "🔥 0"),
+    el("span", "muted small", streak.n ? `day${streak.n === 1 ? "" : "s"} in a row${streak.today ? "" : " – translate today to keep it"}` : "translate a line today to start a streak"));
+  box.append(s);
+  const goal = Number(p?.weekly_goal || 0);
+  const g = el("div", "goal-item goal-team");
+  if (goal) {
+    const pct = Math.min(100, Math.round(100 * week / goal));
+    const bar = el("div", "progress big");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-valuenow", String(pct));
+    bar.setAttribute("aria-label", "Team goal this week");
+    const fill = el("span", "bar done");
+    fill.style.width = `${pct}%`;
+    bar.append(fill);
+    g.append(el("span", "small", `Team goal this week${projects.length > 1 ? ` · ${p.name}` : ""}: ${fmt(week)} of ${fmt(goal)} translations${week >= goal ? " 🎉" : ""}`), bar);
+  } else {
+    g.append(el("span", "muted small", `${fmt(week)} translations by the team this week.${actingAdmin() ? " Set a weekly goal in Admin → Projects." : ""}`));
+  }
+  box.append(g);
+}
+
+// ---------- theme: auto, light or dark ----------
+function applyTheme(pick = localGet("theme") || "auto") {
+  if (pick === "light" || pick === "dark") document.documentElement.dataset.theme = pick;
+  else delete document.documentElement.dataset.theme;
+  for (const b of $$("[data-theme-pick]")) b.setAttribute("aria-pressed", String(b.dataset.themePick === pick));
+}
+
+// ---------- admin: glossary and weekly goals ----------
+async function renderGlossaryAdmin() {
+  const t = $("#glossary-table");
+  t.textContent = "";
+  if (!project) { t.append(el("caption", "empty", "Open a project first.")); return; }
+  await loadGlossary();
+  const head = el("tr");
+  for (const h of ["In the original", "Agreed translation", "Note", ""]) head.append(el("th", "", h));
+  t.append(head);
+  if (!glossary.length) t.append(el("caption", "empty", `No terms yet for ${project.name}.`));
+  for (const g of glossary) {
+    const tr = el("tr");
+    const del = el("button", "small ghost", "Remove");
+    del.type = "button";
+    del.addEventListener("click", async () => {
+      try { await must(sb.from("glossary").delete().eq("id", g.id)); await renderGlossaryAdmin(); } catch (err) { toast(explain(err), true); }
+    });
+    const act = el("td");
+    act.append(del);
+    tr.append(el("td", "", g.source), el("td", "", g.target || "(keep as it is)"), el("td", "muted", g.note), act);
+    t.append(tr);
+  }
+}
+
+async function addGlossary(rows) {
+  await loadGlossary();
+  const known = new Set(glossary.map((g) => g.source.trim().toLowerCase()));
+  const fresh = rows.map((r) => ({ project_id: project.id, source: String(r.source || "").trim(), target: String(r.target || "").trim(), note: String(r.note || "").trim() }))
+    .filter((r) => r.source && !known.has(r.source.toLowerCase()) && (known.add(r.source.toLowerCase()), true));
+  if (fresh.length) await must(sb.from("glossary").insert(fresh));
+  return fresh.length;
+}
+
+function exportGlossary() {
+  const data = glossary.map((g) => ({ source: g.source, target: g.target, note: g.note }));
+  const a = Object.assign(el("a"), { href: URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })),
+                                     download: `${project.name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-")}.glossary.json` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
 // ---------- admin: team ----------
 async function openAdmin() {
   $("#admin").showModal();
@@ -1635,7 +2256,19 @@ function renderProjectAdmin() {
     const del = el("button", "small", "Delete…");
     del.type = "button";
     del.addEventListener("click", () => deleteProject(p));
-    row.append(info, lab, exp, del);
+    const goal = el("label", "check small goal-input");
+    const gi = Object.assign(el("input"), { type: "number", min: 0, step: 10, value: p.weekly_goal ?? 0, title: "Translations the team aims for each week (0 = no goal)" });
+    gi.addEventListener("change", async () => {
+      const v = Math.max(0, Math.round(Number(gi.value) || 0));
+      try {
+        await must(sb.from("projects").update({ weekly_goal: v }).eq("id", p.id));
+        p.weekly_goal = v;
+        toast(v ? `Weekly goal for ${p.name}: ${fmt(v)} translations.` : `No weekly goal for ${p.name}.`);
+      } catch (err) { toast(explain(err), true); gi.value = p.weekly_goal ?? 0; }
+    });
+    goal.append("Weekly goal", gi);
+    if (p.weekly_goal === undefined) goal.hidden = true; // database without update 7
+    row.append(info, goal, lab, exp, del);
     box.append(row);
   }
 }
@@ -1851,38 +2484,70 @@ async function runImport() {
   }
 }
 
-// ---------- admin: dashboard ----------
-const WEEKS = 12;
+// ---------- admin: dashboard (by day or by week, with trends) ----------
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; } })();
 const KINDS = ["written", "approved", "reviewed", "notes"];
-let dash = null;          // {weeks, activity, progress, people, oldWaiting, scenes}; weeks oldest first, one extra in front
-let dashWeek = null;      // the week the report is about: its Monday, "2026-10-26"
+const DAYS_LOADED = 91;   // 13 weeks of days: enough for every view and its moving averages
+let dash = null;          // {daily, activity, progress: Map day -> row, people, oldWaiting, review, scenes}
+let dashMode = localGet("dash.mode") === "week" ? "week" : "day";
+let dashRange = [14, 30, 60, 90].includes(Number(localGet("dash.range"))) ? Number(localGet("dash.range")) : 30;
+let dashPeriod = null;    // the report's period: a day, or a week's Monday ("2026-10-26")
 let dashToken = 0;
 
 const fmt = (n) => Number(n).toLocaleString();
 const plural = (n, word) => `${fmt(n)} ${word}${Number(n) === 1 ? "" : "s"}`;
-const compact = (n) => new Intl.NumberFormat(undefined, { notation: "compact" }).format(n);
-function dayOf(w) { const [y, m, d] = w.split("-").map(Number); return new Date(y, m - 1, d); }
-function shortDate(d) { return d.toLocaleDateString(undefined, { day: "numeric", month: "short" }); }
-function weekRange(w) {
-  const a = dayOf(w), b = dayOf(w);
-  b.setDate(b.getDate() + 6);
-  return `${shortDate(a)} – ${shortDate(b)}`;
+const compact = (n) => new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+const iso = (d) => d.toLocaleDateString("sv"); // YYYY-MM-DD in local time
+function dayOf(s) { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); }
+function addDays(s, n) { const d = dayOf(s); d.setDate(d.getDate() + n); return iso(d); }
+function mondayOf(s) { const d = dayOf(s); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return iso(d); }
+function todayIso() { return iso(new Date()); }
+function shortDate(s) { return dayOf(s).toLocaleDateString(undefined, { day: "numeric", month: "short" }); }
+function weekRange(w) { return `${shortDate(w)} – ${shortDate(addDays(w, 6))}`; }
+function periodName(key, mode = dashMode) {
+  return mode === "day" ? dayOf(key).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }) : weekRange(key);
 }
-function isThisWeek(w) { return w === dash.weeks[dash.weeks.length - 1]; }
-function prevWeek(w) { const i = dash.weeks.indexOf(w); return i > 0 ? dash.weeks[i - 1] : null; }
-function approvedBy(w) { return Number(dash.progress.find((r) => r.week === w)?.approved ?? 0); }
-function approvedIn(w) { const p = prevWeek(w); return p ? approvedBy(w) - approvedBy(p) : null; }
+function hours(h) {
+  if (h == null) return "–";
+  const n = Number(h);
+  return n < 1 ? `${Math.round(n * 60)} min` : n < 48 ? `${n.toFixed(1)} h` : `${(n / 24).toFixed(1)} d`;
+}
 
-/** Everyone's work in one week, added up. Active = wrote, reviewed or wrote a note. */
-function weekTotals(w) {
-  const t = { written: 0, approved: 0, reviewed: 0, notes: 0, people: 0 };
-  for (const r of dash.activity.filter((x) => x.week === w)) {
-    for (const k of KINDS) t[k] += Number(r[k]);
-    if (Number(r.written) || Number(r.reviewed) || Number(r.notes)) t.people++;
+/** The periods on screen, oldest first: the last N days, or the last 12 weeks. */
+function buckets() {
+  if (dashMode === "day") return Array.from({ length: dashRange }, (_, i) => addDays(todayIso(), i - dashRange + 1));
+  const monday = mondayOf(todayIso());
+  return Array.from({ length: 12 }, (_, i) => addDays(monday, (i - 11) * 7));
+}
+function daysIn(key) { return dashMode === "day" ? [key] : Array.from({ length: 7 }, (_, i) => addDays(key, i)); }
+function prevBucket(key) { return addDays(key, dashMode === "day" ? -1 : -7); }
+function isCurrent(key) { return daysIn(key).includes(todayIso()); }
+
+/** Everyone's work in a stretch of days, added up; per person too. Active = wrote, reviewed or wrote a note. */
+function totalsIn(days) {
+  const set = new Set(days);
+  const t = { written: 0, approved: 0, reviewed: 0, notes: 0, people: 0, byName: new Map() };
+  for (const r of dash.activity) {
+    if (!set.has(r.day)) continue;
+    const p = t.byName.get(r.name) || { name: r.name, written: 0, approved: 0, reviewed: 0, notes: 0 };
+    for (const k of KINDS) { t[k] += Number(r[k]); p[k] += Number(r[k]); }
+    t.byName.set(r.name, p);
   }
+  t.people = [...t.byName.values()].filter((p) => p.written || p.reviewed || p.notes).length;
   return t;
 }
+function totals(key) { return totalsIn(daysIn(key)); }
+function lastDays(n, endingDaysAgo = 0) { return Array.from({ length: n }, (_, i) => addDays(todayIso(), -endingDaysAgo - i)); }
+
+/** The progress row at the end of a day (the latest one on or before it). */
+function progressAt(day) {
+  let best = null;
+  for (const [d, r] of dash.progress) if (d <= day && (!best || d > best[0])) best = [d, r];
+  return best ? best[1] : { approved: 0, waiting: null, total: 0 };
+}
+function bucketEnd(key) { const t = todayIso(); return daysIn(key).filter((d) => d <= t).pop() || key; }
+function approvedAt(key) { return Number(progressAt(bucketEnd(key)).approved); }
+function waitingAt(key) { const w = progressAt(bucketEnd(key)).waiting; return w == null ? null : Number(w); }
 
 async function loadDash(quiet = false) {
   const token = ++dashToken;
@@ -1890,21 +2555,36 @@ async function loadDash(quiet = false) {
   $("#dash-title").textContent = project.name;
   if (!quiet) $("#dash").classList.add("loading");
   try {
+    let activity, progress, daily = true;
+    try {
+      [activity, progress] = await Promise.all([
+        must(sb.rpc("daily_activity", { p_project: p, p_days: DAYS_LOADED, p_tz: TZ })),
+        must(sb.rpc("daily_progress", { p_project: p, p_days: DAYS_LOADED, p_tz: TZ })),
+      ]);
+    } catch { // a database without update 7: weeks only
+      daily = false;
+      const [wa, wp] = await Promise.all([
+        must(sb.rpc("weekly_activity", { p_project: p, p_weeks: 13, p_tz: TZ })),
+        must(sb.rpc("weekly_progress", { p_project: p, p_weeks: 13, p_tz: TZ })),
+      ]);
+      activity = wa.map((r) => ({ ...r, day: r.week }));
+      progress = wp.map((r) => ({ day: r.week, approved: r.approved, waiting: null, total: r.total }));
+    }
     const weekAgo = new Date(Date.now() - 7 * 86400e3).toISOString();
-    const [activity, progress, people, oldWaiting] = await Promise.all([
-      must(sb.rpc("weekly_activity", { p_project: p, p_weeks: WEEKS + 1, p_tz: TZ })),
-      must(sb.rpc("weekly_progress", { p_project: p, p_weeks: WEEKS + 1, p_tz: TZ })),
+    const [people, oldWaiting, review] = await Promise.all([
       must(sb.rpc("people_stats", { p_project: p })),
       sb.from("versions").select("id", { count: "exact", head: true })
         .eq("project_id", p).eq("status", "pending").lt("created_at", weekAgo)
-        .then(({ count, error }) => { if (error) throw error; return count || 0; }),
+        .then(({ count: n, error }) => { if (error) throw error; return n || 0; }),
+      sb.rpc("review_stats", { p_project: p, p_days: 30 }).then(({ data, error }) => (error ? null : data)),
     ]);
     if (token !== dashToken) return; // something newer is loading
-    const weeks = progress.map((r) => r.week);
-    dash = { weeks, activity, progress, people, oldWaiting, scenes: [] };
-    if (!weeks.slice(1).includes(dashWeek)) dashWeek = weeks[weeks.length - 1];
-    renderWeekSelect();
-    renderTiles();
+    dash = { daily, activity, progress: new Map(progress.map((r) => [r.day, r])), people, oldWaiting, review, scenes: [] };
+    if (!daily) dashMode = "week";
+    $("#dash-note").hidden = daily;
+    $("#dash-note").textContent = "Daily numbers, the review backlog and review times need a database update (update-7-team-features.sql) – showing weeks for now.";
+    renderDashControls();
+    renderKpis();
     renderCharts();
     renderHeat();
     renderContrib();
@@ -1920,44 +2600,106 @@ function scheduleDash() {
   dashTimer = setTimeout(() => { if (current === "dash" && project) loadDash(true).catch(() => {}); }, 3000);
 }
 
-function renderWeekSelect() {
-  const sel = $("#dash-week");
+function renderDashControls() {
+  for (const b of $$("[data-mode]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.mode === dashMode));
+    b.disabled = b.dataset.mode === "day" && !dash.daily;
+  }
+  const range = $("#dash-range");
+  range.textContent = "";
+  if (dashMode === "day") {
+    for (const n of [14, 30, 60, 90]) range.append(Object.assign(el("option", "", `Last ${n} days`), { value: n }));
+    range.value = dashRange;
+  } else {
+    range.append(Object.assign(el("option", "", "Last 12 weeks"), { value: 12 }));
+  }
+  range.disabled = dashMode !== "day";
+  const keys = buckets();
+  if (!keys.includes(dashPeriod)) dashPeriod = keys[keys.length - 1];
+  const sel = $("#dash-period");
   sel.textContent = "";
-  dash.weeks.slice(1).reverse().forEach((w, i) => {
-    const name = ["This week", "Last week"][i];
-    sel.append(Object.assign(el("option", "", name ? `${name} · ${weekRange(w)}` : weekRange(w)), { value: w }));
+  keys.slice().reverse().forEach((k, i) => {
+    const name = (dashMode === "day" ? ["Today", "Yesterday"] : ["This week", "Last week"])[i];
+    sel.append(Object.assign(el("option", "", name ? `${name} · ${periodName(k)}` : periodName(k)), { value: k }));
   });
-  sel.value = dashWeek;
+  sel.value = dashPeriod;
+  $("#dash-copy").textContent = dashMode === "day" ? "Copy daily report" : "Copy weekly report";
 }
 
-function tile(label, value, sub, delta, hero = false) {
+function setDashMode(mode) {
+  if (mode === dashMode || (mode === "day" && !dash?.daily)) return;
+  dashMode = mode;
+  localSet("dash.mode", mode);
+  dashPeriod = null;
+  rerenderDash();
+}
+
+function rerenderDash() {
+  renderDashControls();
+  renderKpis();
+  renderCharts();
+  renderHeat();
+  renderReport();
+  loadReport().catch((err) => toast(explain(err), true));
+}
+
+// ---------- dashboard: the numbers on top ----------
+/** A figure: label, value, what it means, and how it moved (dir: 1 = better, -1 = worse, 0 = same). */
+function kpi(label, value, sub, delta, dir = 0, hero = false) {
   const t = el("div", "tile card" + (hero ? " hero" : ""));
   t.append(el("div", "tile-label", label), el("div", "tile-value", value));
   if (sub) t.append(el("div", "tile-sub", sub));
-  if (delta != null) {
-    const d = el("div", "tile-delta " + (delta > 0 ? "up" : delta < 0 ? "down" : ""));
-    d.textContent = `${delta > 0 ? "▲ +" : delta < 0 ? "▼ −" : "= "}${fmt(Math.abs(delta))} vs. the week before`;
-    t.append(d);
-  }
+  if (delta) t.append(el("div", "tile-delta " + (dir > 0 ? "up" : dir < 0 ? "down" : ""), delta));
   return t;
 }
 
-function renderTiles() {
-  const c = sum(stats), w = dashWeek, p = prevWeek(w);
-  const now = weekTotals(w), before = weekTotals(p);
-  const gained = approvedIn(w), gainedBefore = approvedIn(p);
-  const when = isThisWeek(w) ? "this week" : "that week";
+/** A tile for the welcome page (whole numbers, change against the week before). */
+function tile(label, value, sub, delta, hero = false) {
+  const text = delta == null ? "" : `${delta > 0 ? "▲ +" : delta < 0 ? "▼ −" : "= "}${fmt(Math.abs(delta))} vs. the week before`;
+  return kpi(label, value, sub, text, Math.sign(delta || 0), hero);
+}
+
+function change(now, before, unit = "", lowerIsBetter = false, digits = 1, than = "the 7 days before") {
+  if (before == null || now == null || !isFinite(now) || !isFinite(before)) return ["", 0];
+  const d = now - before;
+  if (Math.abs(d) < Math.pow(10, -digits) / 2) return [`= same as ${than}`, 0];
+  const dir = (d > 0 ? 1 : -1) * (lowerIsBetter ? -1 : 1);
+  return [`${d > 0 ? "▲ +" : "▼ −"}${Math.abs(d).toFixed(digits)}${unit} vs. ${than}`, dir];
+}
+
+function renderKpis() {
+  const c = sum(stats);
+  const t = todayIso();
+  const w7 = totalsIn(lastDays(7)), w7b = totalsIn(lastDays(7, 7));
+  const a = (n) => Number(progressAt(addDays(t, -n)).approved);
+  const pace7 = (a(0) - a(7)) / 7, pace7b = (a(7) - a(14)) / 7, pace14 = (a(0) - a(14)) / 14;
+  const total = Number(progressAt(t).total) || c.total;
+  const left = Math.max(0, total - a(0));
+  const backlog = progressAt(t).waiting, backlogBefore = progressAt(addDays(t, -7)).waiting;
+  const cur = dash.review?.find((r) => r.period === "current"), prev = dash.review?.find((r) => r.period === "previous");
+  const rate = (r) => (r && Number(r.decided) ? 100 * Number(r.approved) / Number(r.decided) : null);
+  let eta = "–", etaSub = "no approvals in the last 14 days";
+  if (!left) { eta = "Done 🎉"; etaSub = "every line has an approved translation"; }
+  else if (pace14 > 0) {
+    const days = Math.ceil(left / pace14);
+    eta = dayOf(addDays(t, days)).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+    etaSub = `${fmt(left)} lines left · ${days} days at ${pace14.toFixed(1)} lines/day (14-day pace)`;
+  }
   const box = $("#dash-tiles");
   box.textContent = "";
   box.append(
-    tile("Approved", c.total ? `${Math.floor(100 * c.done / c.total)}%` : "–", `${fmt(c.done)} of ${fmt(c.total)} lines`, null, true),
-    tile("Newly approved", fmt(gained), `lines ${when}`, gainedBefore == null ? null : gained - gainedBefore),
-    tile("Written", fmt(now.written), `translations ${when}`, now.written - before.written),
-    tile("Active people", fmt(now.people), `wrote, reviewed or added notes ${when}`, now.people - before.people),
-    tile("Waiting for review", fmt(c.review), dash.oldWaiting
-      ? `${fmt(dash.oldWaiting)} suggestion${dash.oldWaiting > 1 ? "s" : ""} waiting more than a week`
-      : "nothing waiting more than a week"),
-    tile("Untranslated", fmt(c.untranslated), "lines"),
+    kpi("Approved", c.total ? `${Math.floor(100 * c.done / c.total)}%` : "–", `${fmt(c.done)} of ${fmt(c.total)} lines`, "", 0, true),
+    kpi("Throughput", (w7.written / 7).toFixed(1), "translations / day (7-day average)", ...change(w7.written / 7, w7b.written / 7)),
+    kpi("Approval pace", pace7.toFixed(1), "lines approved / day (7-day average)", ...change(pace7, pace7b)),
+    kpi("Finish forecast", eta, etaSub),
+    kpi("Review backlog", backlog == null ? fmt(c.review) : fmt(backlog), backlog == null ? "lines waiting for review"
+      : `versions waiting${dash.oldWaiting ? ` · ${fmt(dash.oldWaiting)} for over a week` : ""}`,
+      ...(backlog == null ? ["", 0] : change(Number(backlog), backlogBefore == null ? null : Number(backlogBefore), "", true, 0))),
+    kpi("Time to decision", cur ? hours(cur.median_hours) : "–", cur ? `median · 90% within ${hours(cur.p90_hours)} (30 days)` : "needs update 7",
+      ...(cur && prev ? change(Number(cur.median_hours), Number(prev.median_hours), " h", true, 1, "the 30 days before") : ["", 0])),
+    kpi("Approval rate", rate(cur) == null ? "–" : `${Math.round(rate(cur))}%`, cur ? `${fmt(cur.approved)} of ${fmt(cur.decided)} decided versions (30 days)` : "needs update 7",
+      ...(rate(cur) != null && rate(prev) != null ? change(rate(cur), rate(prev), " pts", false, 0, "the 30 days before") : ["", 0])),
+    kpi("Active people", fmt(w7.people), "wrote, reviewed or added notes (7 days)", ...change(w7.people, w7b.people, "", false, 0)),
   );
 }
 
@@ -1980,19 +2722,36 @@ function niceScale(top) {
 }
 
 /** A column with a 4px rounded top, square at the baseline. */
-function colPath(x, y, w, h) {
-  const r = Math.min(4, h, w / 2);
+function colPath(x, y, w, h, round = true) {
+  const r = round ? Math.min(4, h, w / 2) : 0;
   return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
 }
 
-/** points: [{week, label, value}], oldest first. kind: "line" | "columns". */
-function drawChart(box, points, kind, describe) {
+/** Least-squares line through the last n points: [{i, v}, {i, v}] at its two ends. */
+function trendOf(values, n) {
+  const pts = values.map((v, i) => [i, v]).slice(-n).filter(([, v]) => v != null);
+  if (pts.length < 2) return null;
+  const mx = pts.reduce((s, [x]) => s + x, 0) / pts.length, my = pts.reduce((s, [, y]) => s + y, 0) / pts.length;
+  const sxx = pts.reduce((s, [x]) => s + (x - mx) ** 2, 0);
+  const slope = sxx ? pts.reduce((s, [x, y]) => s + (x - mx) * (y - my), 0) / sxx : 0;
+  const at = (x) => my + slope * (x - mx);
+  return { slope, from: { i: pts[0][0], v: at(pts[0][0]) }, to: { i: pts[pts.length - 1][0], v: at(pts[pts.length - 1][0]) } };
+}
+
+/**
+ * points: [{key, label, value | parts: [..]}], oldest first.
+ * kind: "line" | "columns" | "stack". opts: {avg: [..], trend, describe(p, i), selected}
+ */
+function drawChart(box, points, kind, opts = {}) {
   box.textContent = "";
-  const W = Math.max(box.clientWidth, 260), H = 210;
+  if (!points.length) return;
+  const W = Math.max(box.clientWidth, 260), H = 220;
   const m = { t: 18, r: kind === "line" ? 48 : 12, b: 26, l: 40 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
-  const { max, ticks } = niceScale(Math.max(...points.map((p) => p.value)));
-  const y = (v) => m.t + ih - (v / max) * ih;
+  const valueOf = (p) => (kind === "stack" ? p.parts.reduce((s, v) => s + v, 0) : p.value ?? 0);
+  const top = Math.max(...points.map(valueOf), ...(opts.avg || []).map((v) => v || 0), opts.trend ? Math.max(opts.trend.from.v, opts.trend.to.v) : 0);
+  const { max, ticks } = niceScale(top);
+  const y = (v) => m.t + ih - (Math.max(0, v) / max) * ih;
   const band = iw / points.length;
   const x = (i) => m.l + band * (i + 0.5);
   const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H }, box);
@@ -2001,105 +2760,163 @@ function drawChart(box, points, kind, describe) {
     if (t) svg("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(t), y2: y(t) }, s);
     svg("text", { class: "axis", x: m.l - 8, y: y(t) + 4, "text-anchor": "end" }, s).textContent = compact(t);
   }
-  const every = Math.max(1, Math.ceil(points.length / Math.max(1, Math.floor(iw / 58))));
+  const every = Math.max(1, Math.ceil(points.length / Math.max(1, Math.floor(iw / 52))));
   points.forEach((p, i) => {
     if ((points.length - 1 - i) % every) return;
     svg("text", { class: "axis", x: x(i), y: H - 8, "text-anchor": "middle" }, s).textContent = p.label;
   });
 
-  const sel = points.findIndex((p) => p.week === dashWeek);
+  const sel = points.findIndex((p) => p.key === opts.selected);
   if (kind === "line") {
     const d = points.map((p, i) => `${i ? "L" : "M"}${x(i)},${y(p.value)}`).join("");
     svg("path", { class: "area", d: `${d}L${x(points.length - 1)},${y(0)}L${x(0)},${y(0)}Z` }, s);
     svg("path", { class: "line", d }, s);
+    if (opts.trend) svg("line", { class: "trend", x1: x(opts.trend.from.i), y1: y(opts.trend.from.v), x2: x(opts.trend.to.i), y2: y(opts.trend.to.v) }, s);
     const last = points.length - 1;
     if (sel >= 0 && sel !== last) svg("circle", { class: "dot", cx: x(sel), cy: y(points[sel].value), r: 4 }, s);
     svg("circle", { class: "dot", cx: x(last), cy: y(points[last].value), r: 4 }, s);
     svg("text", { class: "value", x: x(last) + 9, y: y(points[last].value) + 4 }, s).textContent = compact(points[last].value);
   } else {
-    const bw = Math.min(24, band - 6);
+    const bw = Math.max(2, Math.min(24, band - (band > 8 ? 4 : 1)));
     points.forEach((p, i) => {
-      const h = y(0) - y(p.value);
-      if (h > 0) svg("path", { class: "col" + (i === sel ? " sel" : ""), d: colPath(x(i) - bw / 2, y(p.value), bw, h) }, s);
+      if (kind === "stack") {
+        let base = 0;
+        p.parts.forEach((v, k) => {
+          if (!v) return;
+          const top2 = base + v;
+          const yTop = y(top2), h = y(base) - yTop;
+          const last = p.parts.slice(k + 1).every((n) => !n);
+          svg("path", { class: `col s${k + 1}`, d: colPath(x(i) - bw / 2, yTop + (base ? 1 : 0), bw, Math.max(0, h - (base ? 1 : 0)), last) }, s);
+          base = top2;
+        });
+      } else {
+        const h = y(0) - y(p.value);
+        if (h > 0) svg("path", { class: "col" + (i === sel ? " sel" : ""), d: colPath(x(i) - bw / 2, y(p.value), bw, h) }, s);
+      }
     });
-    if (sel >= 0) {
-      svg("text", { class: "value", x: x(sel), y: y(points[sel].value) - 6, "text-anchor": "middle" }, s)
-        .textContent = compact(points[sel].value);
+    if (opts.avg) {
+      const d = opts.avg.map((v, i) => (v == null ? "" : `${i && opts.avg[i - 1] != null ? "L" : "M"}${x(i)},${y(v)}`)).join("");
+      svg("path", { class: "avg", d }, s);
+    }
+    if (sel >= 0 && kind === "columns") {
+      svg("text", { class: "value", x: x(sel), y: y(points[sel].value) - 6, "text-anchor": "middle" }, s).textContent = compact(points[sel].value);
     }
   }
   svg("line", { class: "baseline", x1: m.l, x2: W - m.r, y1: y(0), y2: y(0) }, s);
 
-  // hover and keyboard focus: one band per week, the whole height of the plot
+  // hover and keyboard focus: one band per period, the whole height of the plot
   const tip = el("div", "chart-tip");
   tip.hidden = true;
   box.append(tip);
-  const cross = kind === "line" ? svg("line", { class: "cross", y1: m.t, y2: y(0), visibility: "hidden" }, s) : null;
+  const cross = svg("line", { class: "cross", y1: m.t, y2: y(0), visibility: "hidden" }, s);
   points.forEach((p, i) => {
+    const text = opts.describe(p, i);
     const hit = svg("rect", { class: "hit", x: m.l + band * i, y: m.t, width: band, height: ih, tabindex: 0,
-                              role: "img", "aria-label": describe(p, i).replace(/\n/g, ", ") }, s);
+                              role: "img", "aria-label": text.replace(/\n/g, ", ") }, s);
     const show = () => {
-      tip.textContent = describe(p, i);
+      tip.textContent = text;
       tip.hidden = false;
       tip.style.left = `${Math.min(Math.max(x(i), 90), W - 90)}px`;
-      tip.style.top = `${y(p.value) - 10}px`;
-      if (cross) { cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible"); }
+      tip.style.top = `${y(valueOf(p)) - 10}px`;
+      cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
     };
-    const hide = () => { tip.hidden = true; cross?.setAttribute("visibility", "hidden"); };
+    const hide = () => { tip.hidden = true; cross.setAttribute("visibility", "hidden"); };
     hit.addEventListener("mouseenter", show);
     hit.addEventListener("focus", show);
     hit.addEventListener("mouseleave", hide);
     hit.addEventListener("blur", hide);
-    hit.addEventListener("click", () => pickWeek(p.week));
+    hit.addEventListener("click", () => pickPeriod(p.key));
+  });
+}
+
+/** Moving average of the team's translations, ending at each period (7 days, or 4 weeks). */
+function movingAvg(keys) {
+  return keys.map((k) => {
+    if (dashMode === "day") return totalsIn(Array.from({ length: 7 }, (_, i) => addDays(k, -i))).written / 7;
+    const first = mondayOf([...dash.progress.keys()].sort()[0] || k); // only weeks we have data for
+    const ws = [0, 1, 2, 3].map((n) => addDays(k, -7 * n)).filter((w) => w >= first);
+    return ws.reduce((s, w) => s + totalsIn(daysIn(w)).written, 0) / Math.max(1, ws.length);
   });
 }
 
 function renderCharts() {
-  const weeks = dash.weeks.slice(1);
-  const total = Number(dash.progress[0]?.total || 0);
+  const keys = buckets();
+  const label = (k) => shortDate(k);
+  const unit = dashMode === "day" ? "day" : "week";
+  const total = Number(progressAt(todayIso()).total) || sum(stats).total;
   const pct = (n) => (total ? ` (${Math.floor(100 * n / total)}%)` : "");
-  $("#chart-progress-sub").textContent = `Out of ${fmt(total)} lines, at the end of each week. Click a week for its report.`;
-  drawChart($("#chart-progress"), weeks.map((w) => ({ week: w, label: shortDate(dayOf(w)), value: approvedBy(w) })), "line",
-    (p) => `${weekRange(p.week)}\n${fmt(p.value)} lines approved${pct(p.value)}\n+${fmt(approvedIn(p.week))} that week`);
-  drawChart($("#chart-written"), weeks.map((w) => ({ week: w, label: shortDate(dayOf(w)), value: weekTotals(w).written })), "columns",
-    (p) => {
-      const t = weekTotals(p.week);
-      return `${weekRange(p.week)}\n${fmt(t.written)} written by ${t.people} ${t.people === 1 ? "person" : "people"}\n${plural(t.reviewed, "review")} · ${plural(t.notes, "note")}`;
+  const tot = keys.map(totals);
+  const avg = movingAvg(keys);
+  $("#c-written-title").textContent = `Translations written per ${unit}`;
+  $("#c-written-unit").textContent = `Per ${unit}`;
+  drawChart($("#chart-written"), keys.map((k, i) => ({ key: k, label: label(k), value: tot[i].written })), "columns", {
+    avg, selected: dashPeriod,
+    describe: (p, i) => `${periodName(p.key)}\n${fmt(p.value)} written by ${tot[i].people} ${tot[i].people === 1 ? "person" : "people"}\nmoving average ${avg[i].toFixed(1)}`,
+  });
+
+  const approved = keys.map(approvedAt);
+  const trend = trendOf(approved, dashMode === "day" ? 14 : 4);
+  $("#chart-progress-sub").textContent = `Out of ${fmt(total)} lines, at the end of each ${unit}.` +
+    (trend ? ` Trend: ${trend.slope >= 0 ? "+" : ""}${trend.slope.toFixed(1)} lines per ${unit}.` : "") + " Click a bar or point for its report.";
+  drawChart($("#chart-progress"), keys.map((k, i) => ({ key: k, label: label(k), value: approved[i] })), "line", {
+    trend, selected: dashPeriod,
+    describe: (p, i) => `${periodName(p.key)}\n${fmt(p.value)} lines approved${pct(p.value)}\n+${fmt(p.value - approvedAt(prevBucket(p.key)))} that ${unit}`,
+  });
+
+  const backlogCard = $("#chart-backlog").closest(".dash-card");
+  backlogCard.hidden = !dash.daily;
+  if (dash.daily) {
+    const waiting = keys.map(waitingAt);
+    drawChart($("#chart-backlog"), keys.map((k, i) => ({ key: k, label: label(k), value: waiting[i] ?? 0 })), "line", {
+      selected: dashPeriod,
+      describe: (p) => `${periodName(p.key)}\n${fmt(p.value)} versions waiting for a decision`,
     });
+  }
+
+  drawChart($("#chart-mix"), keys.map((k, i) => ({ key: k, label: label(k), parts: [tot[i].written, tot[i].reviewed, tot[i].notes] })), "stack", {
+    selected: dashPeriod,
+    describe: (p) => `${periodName(p.key)}\n${fmt(p.parts[0])} written · ${fmt(p.parts[1])} reviews & votes · ${fmt(p.parts[2])} notes`,
+  });
 
   const t = $("#weeks-table");
   t.textContent = "";
   const head = el("tr");
-  for (const [h, c] of [["Week", ""], ["Lines approved", "num"], ["New that week", "num"], ["Written", "num"],
-                        ["Reviews", "num"], ["Notes", "num"], ["Active people", "num"]]) head.append(el("th", c, h));
+  for (const [h, c] of [[dashMode === "day" ? "Day" : "Week", ""], ["Written", "num"], ["Moving avg", "num"], ["Lines approved", "num"],
+                        ["New", "num"], ["Waiting", "num"], ["Reviews & votes", "num"], ["Notes", "num"], ["Active people", "num"]]) head.append(el("th", c, h));
   t.append(head);
-  for (const w of weeks.slice().reverse()) {
-    const s = weekTotals(w);
+  keys.slice().reverse().forEach((k) => {
+    const i = keys.indexOf(k);
     const tr = el("tr");
-    tr.append(el("td", "", weekRange(w)));
-    for (const v of [approvedBy(w), approvedIn(w), s.written, s.reviewed, s.notes, s.people]) tr.append(el("td", "num", fmt(v)));
+    tr.append(el("td", "", periodName(k)));
+    for (const v of [tot[i].written, avg[i].toFixed(1), approved[i], approved[i] - approvedAt(prevBucket(k)), waitingAt(k) ?? "–",
+                     tot[i].reviewed, tot[i].notes, tot[i].people]) tr.append(el("td", "num", typeof v === "number" ? fmt(v) : v));
     t.append(tr);
-  }
+  });
 }
 
-// ---------- dashboard: the weekly report ----------
+// ---------- dashboard: the daily / weekly report ----------
 async function loadReport(token = dashToken) {
-  const w = dashWeek;
-  const scenes = await must(sb.rpc("week_scenes", { p_project: project.id, p_week: w, p_tz: TZ }));
-  if (token !== dashToken || w !== dashWeek) return;
+  const k = dashPeriod;
+  const days = dashMode === "day" ? 1 : 7;
+  let scenes;
+  try {
+    scenes = await must(sb.rpc("period_scenes", { p_project: project.id, p_from: k, p_days: days, p_tz: TZ }));
+  } catch { // a database without update 7
+    scenes = days === 7 ? await must(sb.rpc("week_scenes", { p_project: project.id, p_week: k, p_tz: TZ })) : [];
+  }
+  if (token !== dashToken || k !== dashPeriod) return;
   dash.scenes = scenes;
   renderReport();
 }
 
-/** Who did what in the chosen week; people who were active the week before show up too, with nothing. */
-function weekPeople(w) {
-  const p = prevWeek(w);
-  const rows = dash.activity.filter((r) => r.week === w);
-  const names = [...new Set([...rows, ...dash.activity.filter((r) => r.week === p)].map((r) => r.name))];
+/** Who did what in the period; people who were active the period before show up too, with nothing. */
+function periodPeople(k) {
+  const now = totals(k), before = totals(prevBucket(k));
+  const names = [...new Set([...now.byName.keys(), ...before.byName.keys()])];
   return names.map((name) => {
-    const r = rows.find((x) => x.name === name) || {};
-    const b = dash.activity.find((x) => x.week === p && x.name === name) || {};
-    const o = { name, before: Number(b.written || 0) };
-    for (const k of KINDS) o[k] = Number(r[k] || 0);
+    const r = now.byName.get(name) || {};
+    const o = { name, before: before.byName.get(name)?.written || 0 };
+    for (const kk of KINDS) o[kk] = r[kk] || 0;
     return o;
   }).sort((a, b) => b.written + b.reviewed - (a.written + a.reviewed) || a.name.localeCompare(b.name));
 }
@@ -2110,39 +2927,43 @@ function sceneNow(s) {
   return sceneState(st) === "complete" ? "✓ complete" : `${st.done}/${st.total}`;
 }
 
-function reportSummary(w) {
-  const t = weekTotals(w), b = weekTotals(prevWeek(w));
+function reportSummary(k) {
+  const t = totals(k), b = totals(prevBucket(k));
   const c = sum(stats);
   const diff = t.written - b.written;
+  const unit = dashMode === "day" ? "day" : "week";
   return `${t.people} ${t.people === 1 ? "person" : "people"} wrote ${plural(t.written, "translation")}` +
-    ` (${diff >= 0 ? "+" : "−"}${fmt(Math.abs(diff))} vs. the week before), ${fmt(t.approved)} of theirs got approved,` +
-    ` ${plural(t.reviewed, "review")} done, ${plural(t.notes, "note")}.` +
-    ` Lines approved: ${fmt(approvedBy(prevWeek(w)))} → ${fmt(approvedBy(w))} of ${fmt(c.total)}.`;
+    ` (${diff >= 0 ? "+" : "−"}${fmt(Math.abs(diff))} vs. the ${unit} before), ${fmt(t.approved)} of theirs got approved,` +
+    ` ${plural(t.reviewed, "review")} and votes, ${plural(t.notes, "note")}.` +
+    ` Lines approved: ${fmt(approvedAt(prevBucket(k)))} → ${fmt(approvedAt(k))} of ${fmt(c.total)}.`;
 }
 
 function renderReport() {
-  const w = dashWeek;
-  $("#report-title").textContent = `Weekly report · ${weekRange(w)}${isThisWeek(w) ? " (so far)" : ""}`;
-  $("#report-summary").textContent = reportSummary(w);
+  const k = dashPeriod;
+  const kind = dashMode === "day" ? "Daily report" : "Weekly report";
+  $("#report-title").textContent = `${kind} · ${periodName(k)}${isCurrent(k) ? " (so far)" : ""}`;
+  $("#report-summary").textContent = reportSummary(k);
 
   const t = $("#week-people");
   t.textContent = "";
-  const people = weekPeople(w);
+  const people = periodPeople(k);
   if (!people.length) {
-    t.append(el("caption", "empty", "Nobody worked on this project that week."));
+    t.append(el("caption", "empty", `Nobody worked on this project that ${dashMode === "day" ? "day" : "week"}.`));
   } else {
     const head = el("tr");
     for (const [h, c] of [["Name", ""], ["Written", "num"], ["Approved", "num"], ["Reviews", "num"], ["Notes", "num"]]) head.append(el("th", c, h));
     t.append(head);
     for (const r of people) {
       const tr = el("tr");
-      tr.append(el("td", "", r.name || "?"));
+      const name = el("td");
+      name.append(personChip(r.name || "?"));
+      tr.append(name);
       const written = el("td", "num", fmt(r.written));
       const d = r.written - r.before;
       if (d) written.append(el("span", "muted small", ` (${d > 0 ? "+" : "−"}${fmt(Math.abs(d))})`));
-      written.title = `${fmt(r.before)} the week before`;
+      written.title = `${fmt(r.before)} the ${dashMode === "day" ? "day" : "week"} before`;
       tr.append(written);
-      for (const k of ["approved", "reviewed", "notes"]) tr.append(el("td", "num", fmt(r[k])));
+      for (const kk of ["approved", "reviewed", "notes"]) tr.append(el("td", "num", fmt(r[kk])));
       t.append(tr);
     }
   }
@@ -2150,7 +2971,7 @@ function renderReport() {
   const s = $("#week-scenes");
   s.textContent = "";
   if (!dash.scenes.length) {
-    s.append(el("caption", "empty", "No scene was worked on that week."));
+    s.append(el("caption", "empty", `No scene was worked on that ${dashMode === "day" ? "day" : "week"}.`));
     return;
   }
   const head = el("tr");
@@ -2165,16 +2986,16 @@ function renderReport() {
   }
 }
 
-/** The weekly report as plain text, to paste into the team chat. */
+/** The report as plain text, to paste into the team chat. */
 function reportText() {
-  const w = dashWeek, c = sum(stats);
+  const k = dashPeriod, c = sum(stats);
   const out = [
-    `Weekly report – ${project.name} – ${weekRange(w)}, ${dayOf(w).getFullYear()}${isThisWeek(w) ? " (so far)" : ""}`,
+    `${dashMode === "day" ? "Daily" : "Weekly"} report – ${project.name} – ${periodName(k)}, ${dayOf(k).getFullYear()}${isCurrent(k) ? " (so far)" : ""}`,
     "",
-    reportSummary(w),
+    reportSummary(k),
     `Now: ${progressText(c)}.`,
   ];
-  const people = weekPeople(w).filter((r) => r.written || r.reviewed || r.notes || r.approved);
+  const people = periodPeople(k).filter((r) => r.written || r.reviewed || r.notes || r.approved);
   if (people.length) {
     out.push("", "Who did what:");
     for (const r of people) out.push(`- ${r.name}: ${fmt(r.written)} written, ${fmt(r.approved)} approved, ${plural(r.reviewed, "review")}, ${plural(r.notes, "note")}`);
@@ -2195,10 +3016,10 @@ async function copyReport() {
   const text = reportText();
   try {
     await navigator.clipboard.writeText(text);
-    toast("Weekly report copied – paste it into the team chat.");
+    toast("Report copied – paste it into the team chat.");
   } catch {
     const a = Object.assign(el("a"), { href: URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" })),
-                                       download: `weekly-report-${dashWeek}.txt` });
+                                       download: `${dashMode === "day" ? "daily" : "weekly"}-report-${dashPeriod}.txt` });
     document.body.append(a);
     a.click();
     a.remove();
@@ -2207,46 +3028,54 @@ async function copyReport() {
   }
 }
 
-function pickWeek(w) {
-  if (!dash || w === dashWeek) return;
-  dashWeek = w;
-  $("#dash-week").value = w;
-  renderTiles();
+function pickPeriod(k) {
+  if (!dash || k === dashPeriod) return;
+  dashPeriod = k;
+  $("#dash-period").value = k;
   renderCharts();
   renderHeat();
   renderReport();
   loadReport().catch((err) => toast(explain(err), true));
 }
 
-// ---------- dashboard: week by week, and everything so far ----------
+// ---------- dashboard: person by period, and everything so far ----------
 function renderHeat() {
   const k = $("#heat-measure").value;
-  const weeks = dash.weeks.slice(1);
-  const rows = dash.activity.filter((r) => weeks.includes(r.week));
-  const total = (name) => rows.filter((r) => r.name === name).reduce((t, r) => t + Number(r[k]), 0);
-  const names = [...new Set(rows.map((r) => r.name))].filter((n) => total(n)).sort((a, b) => total(b) - total(a) || a.localeCompare(b));
-  const top = Math.max(1, ...rows.map((r) => Number(r[k])));
+  const keys = buckets();
+  $("#heat-title").textContent = dashMode === "day" ? "Person by day" : "Person by week";
+  $("#heat-hint").textContent = `One row per person, the last ${dashMode === "day" ? `${dashRange} days` : "12 weeks"}. The darker the cell, the more.`;
+  const cells = new Map(); // name -> key -> totals
+  for (const key of keys) for (const [name, r] of totals(key).byName) {
+    if (!cells.has(name)) cells.set(name, new Map());
+    cells.get(name).set(key, r);
+  }
+  const total = (name) => [...cells.get(name).values()].reduce((s, r) => s + r[k], 0);
+  const names = [...cells.keys()].filter((n) => total(n)).sort((a, b) => total(b) - total(a) || a.localeCompare(b));
+  const top = Math.max(1, ...names.flatMap((n) => [...cells.get(n).values()].map((r) => r[k])));
   const t = $("#heat-table");
   t.textContent = "";
-  if (!names.length) { t.append(el("caption", "empty", "Nothing in the last 12 weeks.")); return; }
+  t.classList.toggle("dense", keys.length > 20);
+  if (!names.length) { t.append(el("caption", "empty", `Nothing in the last ${dashMode === "day" ? `${dashRange} days` : "12 weeks"}.`)); return; }
   const head = el("tr");
   head.append(el("th", "", "Name"));
-  for (const w of weeks) {
-    const th = el("th", "num" + (w === dashWeek ? " sel" : ""), shortDate(dayOf(w)));
-    th.title = weekRange(w);
+  for (const key of keys) {
+    const th = el("th", "num" + (key === dashPeriod ? " sel" : ""), dashMode === "day" ? String(dayOf(key).getDate()) : shortDate(key));
+    th.title = periodName(key);
     head.append(th);
   }
   head.append(el("th", "num", "Total"));
   t.append(head);
   for (const name of names) {
     const tr = el("tr");
-    tr.append(el("td", "", name || "?"));
-    for (const w of weeks) {
-      const r = rows.find((x) => x.week === w && x.name === name);
-      const v = r ? Number(r[k]) : 0;
-      const td = el("td", "num cell" + (w === dashWeek ? " sel" : ""), v ? fmt(v) : "");
+    const n = el("td");
+    n.append(personChip(name || "?"));
+    tr.append(n);
+    for (const key of keys) {
+      const r = cells.get(name).get(key);
+      const v = r ? r[k] : 0;
+      const td = el("td", "num cell" + (key === dashPeriod ? " sel" : ""), v ? fmt(v) : "");
       if (v) td.style.background = `color-mix(in srgb, var(--accent) ${Math.round(10 + 50 * v / top)}%, transparent)`;
-      td.title = `${name} · ${weekRange(w)}: ` + (r ? `${fmt(r.written)} written, ${fmt(r.approved)} approved, ${plural(r.reviewed, "review")}, ${plural(r.notes, "note")}` : "nothing");
+      td.title = `${name} · ${periodName(key)}: ` + (r ? `${fmt(r.written)} written, ${fmt(r.approved)} approved, ${plural(r.reviewed, "review")}, ${plural(r.notes, "note")}` : "nothing");
       tr.append(td);
     }
     tr.append(el("td", "num", fmt(total(name))));
@@ -2267,7 +3096,9 @@ function renderContrib() {
   t.append(head);
   for (const r of rows) {
     const tr = el("tr");
-    tr.append(el("td", "", r.name === "Imported" ? "Imported (no name)" : r.name || "?"));
+    const name = el("td");
+    name.append(r.name === "Imported" ? "Imported (no name)" : personChip(r.name || "?"));
+    tr.append(name);
     const barCell = el("td", "bar-col");
     const bar = el("div", "stack");
     const n = Number(r.approved) + Number(r.waiting) + Number(r.not_used);
@@ -2348,10 +3179,46 @@ function init() {
   $$(".tab").forEach((tab) => tab.addEventListener("click", () => {
     $$(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     $$(".tab-panel").forEach((p) => { p.hidden = p.dataset.panel !== tab.dataset.tab; });
+    if (tab.dataset.tab === "glossary") renderGlossaryAdmin().catch((err) => toast(explain(err), true));
   }));
   $$("[data-go]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.go)));
   $("#home-btn").addEventListener("click", () => setView("home"));
   $("#power-btn").addEventListener("click", togglePower);
+  $("#bell-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleBell(); });
+  $("#bell-menu").addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", () => { if (!$("#bell-menu").hidden) toggleBell(false); });
+  $("#bell-read").addEventListener("click", () => markNotificationsRead());
+  $$("[data-theme-pick]").forEach((b) => b.addEventListener("click", () => { localSet("theme", b.dataset.themePick); applyTheme(b.dataset.themePick); }));
+  applyTheme();
+  $("#next-btn").addEventListener("click", goNextTodo);
+  $("#compact-btn").addEventListener("click", () => toggleLook("compact"));
+  $("#side-btn").addEventListener("click", () => toggleLook("side"));
+  $("#keys-btn").addEventListener("click", () => $("#keys").showModal());
+  applyLineLook();
+  document.addEventListener("keydown", onShortcut);
+  document.addEventListener("focusin", (e) => { const c = e.target.closest?.(".line"); if (c) currentLineId = Number(c.dataset.id); });
+  window.addEventListener("hashchange", () => { openFromHash().catch((err) => toast(explain(err), true)); });
+  $("#glossary-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const n = await addGlossary([{ source: $("#gl-source").value, target: $("#gl-target").value, note: $("#gl-note").value }]);
+      if (!n) toast("That term is already in the glossary.");
+      $("#gl-source").value = $("#gl-target").value = $("#gl-note").value = "";
+      await renderGlossaryAdmin();
+      $("#gl-source").focus();
+    } catch (err) { toast(explain(err), true); }
+  });
+  $("#gl-import").addEventListener("change", async (e) => {
+    try {
+      const rows = await readJsonFile(e.target);
+      if (!Array.isArray(rows)) throw new Error("That file isn't a glossary (a list of terms).");
+      const n = await addGlossary(rows);
+      toast(`${n} new term${n === 1 ? "" : "s"} added${rows.length - n ? `, ${rows.length - n} already there` : ""}.`);
+      await renderGlossaryAdmin();
+    } catch (err) { toast(explain(err), true); }
+    e.target.value = "";
+  });
+  $("#gl-export").addEventListener("click", exportGlossary);
   $("#update-reload").addEventListener("click", reloadSite);
   setInterval(tickHome, 1000); // the clock and the time on the welcome page
   checkForUpdate();
@@ -2370,7 +3237,14 @@ function init() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && current === "inbox" && chatWith && unreadCount(chatWith)) markRead(chatWith);
   });
-  $("#dash-week").addEventListener("change", (e) => pickWeek(e.target.value));
+  $("#dash-period").addEventListener("change", (e) => pickPeriod(e.target.value));
+  $$("[data-mode]").forEach((b) => b.addEventListener("click", () => setDashMode(b.dataset.mode)));
+  $("#dash-range").addEventListener("change", (e) => {
+    dashRange = Number(e.target.value);
+    localSet("dash.range", dashRange);
+    dashPeriod = null;
+    rerenderDash();
+  });
   $("#dash-copy").addEventListener("click", copyReport);
   $("#heat-measure").addEventListener("change", () => { if (dash) renderHeat(); });
   let resizeFrame;
@@ -2393,6 +3267,9 @@ function init() {
       me = null;
       if (channel) sb.removeChannel(channel);
       if (dmChannel) sb.removeChannel(dmChannel);
+      if (notesChannel) sb.removeChannel(notesChannel);
+      if (presenceChannel) sb.removeChannel(presenceChannel);
+      presenceChannel = notesChannel = null;
       chatWith = null;
       showOnly("#login");
       return;
