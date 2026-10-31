@@ -244,6 +244,31 @@ function setView(name, render = true) {
   if (name === "inbox") renderInbox();
 }
 
+// ---------- a newer version of the site ----------
+// An open tab keeps running the code it loaded. When the site is updated, offer a reload, so nobody
+// keeps using buttons the database no longer accepts.
+const SITE_FILES = ["./", "app.js", "style.css", "csv.js", "config.js"];
+let loadedTag = null;     // app.js as this tab loaded it (its ETag or Last-Modified)
+
+function tagOf(r) { return r.ok ? r.headers.get("etag") || r.headers.get("last-modified") : null; }
+
+async function checkForUpdate() {
+  try {
+    if (loadedTag == null) {
+      loadedTag = tagOf(await fetch("app.js", { cache: "force-cache" })); // the copy this tab most likely runs
+      if (loadedTag == null) return;
+    }
+    const now = tagOf(await fetch("app.js", { method: "HEAD", cache: "no-store" }));
+    if (now && now !== loadedTag) $("#update-bar").hidden = false;
+  } catch { /* offline: try again later */ }
+}
+
+async function reloadSite() {
+  $("#update-reload").disabled = true;
+  try { await Promise.all(SITE_FILES.map((f) => fetch(f, { cache: "reload" }))); } catch { /* reload anyway */ }
+  location.reload();
+}
+
 // ---------- the admin's power switch ----------
 function renderPower() {
   const on = actingAdmin();
@@ -732,6 +757,12 @@ function renderVotes(v) {
   box.append(meter, el("span", "vote-text", `${c.yes.length} of ${c.need} agree needed (${c.pool} can vote)`));
   if (c.yes.length) box.append(voterList(c.yes, "👍"));
   if (c.no.length) box.append(voterList(c.no, "👎"));
+  // say why there are no vote buttons, instead of leaving people guessing
+  if (!actingAdmin() && !canVoteOn(v)) {
+    box.append(el("span", "vote-why", isAuthorOf(v, me)
+      ? "Your translation – the others vote on it."
+      : "You can't vote yet – ask the admin to tick “can vote” for you (Admin → Team)."));
+  }
   return box;
 }
 
@@ -2243,6 +2274,10 @@ function init() {
   $$("[data-go]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.go)));
   $("#home-btn").addEventListener("click", () => setView("home"));
   $("#power-btn").addEventListener("click", togglePower);
+  $("#update-reload").addEventListener("click", reloadSite);
+  checkForUpdate();
+  setInterval(checkForUpdate, 5 * 60 * 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkForUpdate(); });
   $("#chat-form").addEventListener("submit", sendMessage);
   $("#chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#chat-form").requestSubmit(); }
