@@ -111,6 +111,11 @@
         <h3 id="chat-with">Messages</h3>
       </div>
       <div id="chat-log" class="chat-log" aria-live="polite"></div>
+      <button id="chat-new" class="chat-new small" type="button" hidden>New message ↓</button>
+      <div id="reply-bar" class="reply-bar" hidden>
+        <div class="reply-bar-text"><span class="quote-who"></span><span class="quote-text"></span></div>
+        <button id="reply-cancel" class="ghost small" type="button" aria-label="Cancel the reply">✕</button>
+      </div>
       <form id="chat-form" class="chat-form" hidden>
         <textarea id="chat-input" rows="2" maxlength="4000" placeholder="Write a message… (Enter sends, Shift+Enter for a new line)"></textarea>
         <button id="chat-send" class="primary" type="submit">Send</button>
@@ -135,6 +140,7 @@
         </div>
         <button id="claim-btn" class="ghost" type="button" hidden></button>
       </div>
+      <div id="review-tabs" class="review-tabs" role="tablist" aria-label="Whose translations" hidden></div>
       <div id="lines" class="lines"></div>
     </main>
   </div>

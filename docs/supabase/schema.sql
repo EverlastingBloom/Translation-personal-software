@@ -109,6 +109,7 @@ create table public.messages (
   sender_name text not null default '',
   recipient   uuid not null references public.profiles on delete cascade,
   body        text not null check (length(body) between 1 and 4000),
+  reply_to    bigint references public.messages on delete set null,  -- the message this one answers
   created_at  timestamptz not null default now(),
   read_at     timestamptz
 );
@@ -174,6 +175,7 @@ create trigger stamp_claims before insert on public.claims
   for each row execute function public.stamp_claim();
 
 -- The sender and the time always come from the account, so nobody can write as someone else.
+-- A reply can only answer a message of the same conversation.
 create function public.stamp_message() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
@@ -181,6 +183,12 @@ begin
   new.sender_name := coalesce((select display_name from profiles where id = auth.uid()), '');
   new.created_at := now();
   new.read_at := null;
+  if new.reply_to is not null and not exists (
+      select 1 from messages m where m.id = new.reply_to
+        and ((m.sender = new.sender and m.recipient = new.recipient)
+             or (m.sender = new.recipient and m.recipient = new.sender))) then
+    new.reply_to := null;
+  end if;
   return new;
 end $$;
 create trigger stamp_messages before insert on public.messages
@@ -312,10 +320,12 @@ language sql stable as $$
   group by l.project_id
 $$;
 
--- Lines with their versions and notes: one scene, a search, a state, or given lines.
+-- Lines with their versions and notes: one scene, a search, a state, given lines, or the lines
+-- where one person's translation is waiting for review.
 create function public.get_lines(p_project bigint, p_grp text default null, p_scene text default null,
                                  p_state text default null, p_search text default null,
-                                 p_ids bigint[] default null, p_limit int default 1000)
+                                 p_ids bigint[] default null, p_limit int default 1000,
+                                 p_author text default null)
 returns jsonb language sql stable as $$
   with base as (
     select l.id, l.idx, l.key, l.grp, l.scene, l.speaker, l.source, l.reference,
@@ -326,6 +336,9 @@ returns jsonb language sql stable as $$
       and (p_ids is null or l.id = any (p_ids))
       and (p_grp is null or l.grp = p_grp)
       and (p_scene is null or l.scene = p_scene)
+      and (p_author is null
+           or exists (select 1 from versions v where v.line_id = l.id and v.status = 'pending'
+                      and v.author_name = p_author))
       and (p_search is null
            or l.source ilike '%' || p_search || '%' or l.key ilike '%' || p_search || '%'
            or l.speaker ilike '%' || p_search || '%'
@@ -350,6 +363,17 @@ returns jsonb language sql stable as $$
                          from notes n where n.line_id = b.id), '[]'::jsonb)
     ) order by b.idx), '[]'::jsonb)
   from picked b
+$$;
+
+-- Who is waiting for review: one row per person with translations waiting, most first.
+create function public.review_queue(p_project bigint)
+returns table (name text, waiting bigint, lines bigint, oldest timestamptz)
+language sql stable as $$
+  select author_name, count(*), count(distinct line_id), min(created_at)
+  from versions
+  where project_id = p_project and status = 'pending'
+  group by author_name
+  order by 2 desc, 1
 $$;
 
 -- Who did how much: everything so far, and when each person was last active.

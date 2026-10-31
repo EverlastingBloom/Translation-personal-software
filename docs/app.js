@@ -48,6 +48,9 @@ function explain(err) {
   if (/weekly_activity|weekly_progress|week_scenes/i.test(m) && /function/i.test(m)) {
     return "The dashboard needs a database update: run docs/supabase/update-2-dashboard.sql in Supabase → SQL Editor.";
   }
+  if (/reply_to/i.test(m)) {
+    return "Replies aren't set up yet: the admin runs docs/supabase/update-4-replies-review-tabs.sql in Supabase → SQL Editor.";
+  }
   if (/messages|mark_read/i.test(m) && /schema cache|does not exist|could not find/i.test(m)) {
     return "Messages aren't set up yet: the admin runs docs/supabase/update-3-welcome-messages.sql in Supabase → SQL Editor.";
   }
@@ -373,13 +376,17 @@ async function openScene(grp, scene) {
 async function loadLines() {
   const args = { p_project: project.id, p_state: $("#filter").value || null };
   if (view.search) Object.assign(args, { p_search: view.search, p_limit: 300 });
-  else if (view.review) Object.assign(args, { p_state: "review", p_limit: 300 });
+  else if (view.review) Object.assign(args, { p_state: "review", p_limit: 300 }, view.author ? { p_author: view.author } : {});
   else Object.assign(args, { p_grp: view.grp, p_scene: view.scene });
+  if (!view.review) $("#review-tabs").hidden = true;
+  const asked = view;
   const box = $("#lines");
   box.textContent = "";
   box.append(el("p", "empty", "Loading…"));
   try {
-    lines = await must(sb.rpc("get_lines", args));
+    const got = await must(sb.rpc("get_lines", args));
+    if (asked !== view) return; // another page of lines was asked for meanwhile
+    lines = got;
   } catch (err) {
     box.textContent = "";
     box.append(el("p", "empty", explain(err)));
@@ -387,7 +394,9 @@ async function loadLines() {
   }
   box.textContent = "";
   if (!lines.length) {
-    box.append(el("p", "empty", view.search ? "Nothing found." : $("#filter").value ? "No lines like that here." : "This scene is empty."));
+    box.append(el("p", "empty", view.search ? "Nothing found."
+      : view.review ? (view.author ? `Nothing of ${view.author}'s is waiting for review.` : "Nothing is waiting for review.")
+      : $("#filter").value ? "No lines like that here." : "This scene is empty."));
     return;
   }
   for (const l of lines) box.append(renderLine(l));
@@ -419,6 +428,13 @@ function renderLine(l) {
   if (l.speaker) head.append(el("span", "speaker", l.speaker));
   if (l.key) head.append(el("span", "", l.key));
   if (view.search || view.review) head.append(el("span", "", `${l.grp} › ${l.scene}`));
+  const waitingFrom = [...new Set(l.versions.filter((v) => v.status === "pending").map((v) => v.author_name || "?"))];
+  if (waitingFrom.length) {
+    const flags = el("span", "waiting-from");
+    flags.append("⚑ from ");
+    for (const n of waitingFrom) flags.append(personChip(n));
+    head.append(flags);
+  }
   card.append(head);
 
   const src = el("p", "source");
@@ -429,8 +445,10 @@ function renderLine(l) {
   const approved = l.versions.find((v) => v.status === "approved");
   const main = el("div", "main" + (approved ? "" : " none"));
   if (approved) {
-    main.append(el("div", "main-text", approved.text),
-      el("div", "who", `✓ by ${approved.author_name || "?"} · approved by ${approved.decided_by_name || "?"} ${timeAgo(approved.decided_at)}`));
+    const who = el("div", "who");
+    who.append("✓ by ", personChip(approved.author_name || "?"),
+      ` · approved by ${approved.decided_by_name || "?"} ${timeAgo(approved.decided_at)}`);
+    main.append(el("div", "main-text", approved.text), who);
   } else {
     main.append(el("div", "who", "No approved translation yet"));
   }
@@ -458,12 +476,13 @@ function renderLine(l) {
 }
 
 function renderVersion(l, v) {
-  const box = el("div", `version ${v.status === "pending" ? "pending" : "old"}`);
+  const box = el("div", `version ${v.status === "pending" ? "pending" : "old"} by p${colorSlot(v.author_name)}`);
+  if (view.review && view.author && v.status === "pending") box.classList.add(v.author_name === view.author ? "focus" : "dim");
   const body = el("div", "version-body");
   body.append(el("div", "version-text", v.text));
   const label = { pending: "waiting for review", rejected: "not used", superseded: "replaced" }[v.status] || v.status;
   const who = el("div", "who muted");
-  who.append(el("span", `chip ${v.status}`, label), ` ${v.author_name || "?"} · ${timeAgo(v.created_at)}`);
+  who.append(el("span", `chip ${v.status}`, label), " ", personChip(v.author_name || "?"), ` · ${timeAgo(v.created_at)}`);
   if (v.decided_by_name && v.status !== "pending") who.append(` · decided by ${v.decided_by_name}`);
   const problem = tagProblem(l.source, v.text);
   if (problem) who.append(el("span", "tag-warn", ` · ${problem}`));
@@ -630,6 +649,54 @@ async function withdraw(l, v) {
   }
 }
 
+// ---------- review: everyone together, or one person at a time ----------
+let reviewQueue = [];     // review_queue rows: who has how many lines waiting
+let reviewQueueReady = true;
+
+async function loadReviewQueue() {
+  try {
+    reviewQueue = await must(sb.rpc("review_queue", { p_project: project.id }));
+    reviewQueueReady = true;
+  } catch {
+    reviewQueue = [];
+    reviewQueueReady = false; // database without update 4: only the "Everyone" list
+  }
+  renderReviewTabs();
+}
+
+function renderReviewTabs() {
+  const box = $("#review-tabs");
+  box.hidden = !view?.review;
+  if (box.hidden) return;
+  box.textContent = "";
+  const tab = (key, label, n, title) => {
+    const b = el("button", "rtab" + (view.author === key ? " active" : ""));
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(view.author === key));
+    if (key) b.append(avatar(key));
+    b.append(el("span", "", label), el("span", "rtab-count", fmt(n)));
+    if (title) b.title = title;
+    b.addEventListener("click", () => pickReviewer(key));
+    box.append(b);
+  };
+  tab(null, "Everyone", sum(stats).review, "Every line waiting for review");
+  const rows = reviewQueue.slice();
+  if (view.author && !rows.some((r) => r.name === view.author)) rows.push({ name: view.author, lines: 0 });
+  for (const r of rows) {
+    tab(r.name, r.name === "Imported" ? "Imported (no name)" : r.name, Number(r.lines),
+      r.oldest ? `${fmt(r.waiting)} translation${Number(r.waiting) === 1 ? "" : "s"} by ${r.name} waiting, the oldest from ${timeAgo(r.oldest)}` : "");
+  }
+  if (!reviewQueueReady) box.append(el("span", "hint", "One tab per person needs a database update (update-4-replies-review-tabs.sql)."));
+}
+
+function pickReviewer(name) {
+  view = { review: true, author: name };
+  $("#title").textContent = name ? `Waiting for review · ${name}` : "Waiting for review";
+  renderReviewTabs();
+  loadLines();
+}
+
 // ---------- claims ----------
 function renderClaim() {
   const btn = $("#claim-btn");
@@ -660,7 +727,7 @@ let statsTimer;
 function scheduleStats() {
   clearTimeout(statsTimer);
   statsTimer = setTimeout(async () => {
-    try { await loadStats(); renderClaim(); scheduleDash(); } catch { /* next change tries again */ }
+    try { await loadStats(); renderClaim(); scheduleDash(); if (view?.review) await loadReviewQueue(); } catch { /* next change tries again */ }
   }, 800);
 }
 
@@ -846,27 +913,92 @@ function clickable(box, action) {
   return box;
 }
 
+// ---------- people: a colour and initials for everyone ----------
+let people = [];          // everyone on the team (me too), in the order they joined: that order picks their colour
+let team = [];            // everyone else, by name
+
+async function loadPeople() {
+  people = await must(sb.from("profiles").select("id, display_name, is_admin, created_at").order("created_at"));
+  team = people.filter((p) => p.id !== me.id).sort((a, b) => a.display_name.localeCompare(b.display_name));
+}
+
+/** Colour slot 1-8 for a name: teammates by joining order, other (imported) names by a hash; 0 = no person. */
+function colorSlot(name) {
+  if (!name || name === "?" || name === "Imported") return 0;
+  const i = people.findIndex((p) => p.display_name.toLowerCase() === name.toLowerCase());
+  if (i >= 0) return (i % 8) + 1;
+  let h = 0;
+  for (const ch of name.toLowerCase()) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return ((people.length + h) % 8) + 1;
+}
+
+function initials(name) {
+  const words = (name || "?").trim().split(/\s+/).filter(Boolean);
+  const chars = (w) => [...w];
+  if (words.length > 1) return (chars(words[0])[0] + chars(words[1])[0]).toUpperCase();
+  return chars(words[0] || "?").slice(0, 2).join("").toUpperCase();
+}
+
+function avatar(name) {
+  const a = el("span", `avatar p${colorSlot(name)}`, initials(name));
+  a.title = name || "?";
+  a.setAttribute("aria-hidden", "true");
+  return a;
+}
+
+/** A person's colour, initials and name together - colour is never the only thing telling people apart. */
+function personChip(name) {
+  const c = el("span", "person-chip");
+  c.append(avatar(name), el("span", "", name || "?"));
+  return c;
+}
+
 // ---------- direct messages ----------
-let team = [];            // everyone else on the team
 let inbox = [];           // my recent messages (sent and received), newest first
-let chatLog = [];         // the open conversation, oldest first
-let chatWith = null;      // profile id of the person in the open conversation
+const logs = new Map();   // person id -> that conversation, oldest first
+const loadedLogs = new Set(); // conversations fetched in full
+const extraMsgs = new Map();  // older messages fetched only because a reply quotes them
+const chatDrafts = new Map(); // person id -> text typed but not sent yet
+let chatWith = null;      // person id of the open conversation
+let replyTo = null;       // the message being answered
 let dmChannel = null;
 let dmReady = false;      // false: the messages couldn't be loaded (e.g. the database lacks update 3)
 let dmError = "";
+let tmpSeq = 0;
 
 async function loadInbox() {
+  logs.clear();
+  loadedLogs.clear();
+  extraMsgs.clear();
+  try { await loadPeople(); } catch { people = []; team = []; }
   try {
-    [team, inbox] = await Promise.all([
-      must(sb.from("profiles").select("id, display_name, is_admin").neq("id", me.id).order("display_name")),
-      must(sb.from("messages").select("*").order("created_at", { ascending: false }).limit(500)),
-    ]);
+    inbox = await must(sb.from("messages").select("*").order("created_at", { ascending: false }).limit(500));
     dmReady = true;
   } catch (err) {
+    inbox = [];
     dmReady = false;
     dmError = explain(err);
   }
   renderUnread();
+}
+
+function otherOf(m) { return m.sender === me.id ? m.recipient : m.sender; }
+
+/** The conversation with one person, oldest first (built from the inbox until it's fetched in full). */
+function logOf(id) {
+  if (!logs.has(id)) logs.set(id, inbox.filter((m) => otherOf(m) === id).reverse());
+  return logs.get(id);
+}
+
+function findMsg(id) {
+  for (const log of logs.values()) { const m = log.find((x) => x.id === id); if (m) return m; }
+  return inbox.find((x) => x.id === id) || extraMsgs.get(id);
+}
+
+async function fetchReplyTargets(list) {
+  const ids = [...new Set(list.filter((m) => m.reply_to && !findMsg(m.reply_to)).map((m) => m.reply_to))];
+  if (!ids.length) return;
+  for (const m of await must(sb.from("messages").select("*").in("id", ids))) extraMsgs.set(m.id, m);
 }
 
 function unreadCount(from) {
@@ -881,18 +1013,22 @@ function renderUnread() {
 
 /** Everyone on the team, the ones I talked to most recently first. */
 function conversations() {
-  return team.map((p) => ({ p, last: inbox.find((m) => m.sender === p.id || m.recipient === p.id), unread: unreadCount(p.id) }))
+  return team.map((p) => ({ p, last: inbox.find((m) => otherOf(m) === p.id), unread: unreadCount(p.id) }))
     .sort((a, b) => (b.last?.created_at || "").localeCompare(a.last?.created_at || "") || a.p.display_name.localeCompare(b.p.display_name));
 }
 
 function personButton({ p, last, unread }, onClick) {
   const b = el("button", "person" + (p.id === chatWith ? " active" : "") + (unread ? " unread" : ""));
   b.type = "button";
+  b.dataset.id = p.id;
+  const text = el("span", "person-text");
   const top = el("span", "person-top");
   top.append(el("span", "person-name", p.display_name));
   if (unread) top.append(el("span", "badge", String(unread)));
   else if (last) top.append(el("span", "muted small", timeAgo(last.created_at)));
-  b.append(top, el("span", "person-last small", last ? `${last.sender === me.id ? "You: " : ""}${last.body}` : "No messages yet"));
+  const preview = last ? `${last.sender === me.id ? "You: " : ""}${last.reply_to ? "↩ " : ""}${last.body}` : "No messages yet";
+  text.append(top, el("span", "person-last small", last?.failed ? "⚠ Not sent" : preview));
+  b.append(avatar(p.display_name), text);
   b.addEventListener("click", onClick);
   return b;
 }
@@ -910,90 +1046,221 @@ function renderHomeMessages() {
 }
 
 function renderInbox() {
+  renderPeopleList();
+  renderChat();
+  renderReplyBar();
+}
+
+function renderPeopleList() {
   const list = $("#people-list");
   list.textContent = "";
-  if (!dmReady) { list.append(el("p", "empty", dmError)); renderChat(); return; }
+  if (!dmReady) { list.append(el("p", "empty", dmError)); return; }
   if (!team.length) list.append(el("p", "empty", "Nobody else is on the team yet."));
   for (const c of conversations()) list.append(personButton(c, () => openChat(c.p.id)));
-  renderChat();
 }
 
 async function openChat(id) {
+  if (chatWith) chatDrafts.set(chatWith, $("#chat-input").value);
   chatWith = id;
-  chatLog = [];
+  replyTo = null;
   $("#inbox").classList.add("chatting");
-  renderInbox();
+  $("#chat-input").value = chatDrafts.get(id) || "";
+  renderInbox(); // shows what is already here at once; the full history follows
+  if (matchMedia("(min-width: 761px)").matches) $("#chat-input").focus();
+  if (unreadCount(id)) markRead(id);
+  if (loadedLogs.has(id)) return;
   try {
-    const log = await must(sb.from("messages").select("*")
+    const rows = await must(sb.from("messages").select("*")
       .or(`and(sender.eq.${me.id},recipient.eq.${id}),and(sender.eq.${id},recipient.eq.${me.id})`)
       .order("created_at", { ascending: false }).limit(300));
-    if (chatWith !== id) return;
-    chatLog = log.reverse();
-    renderChat();
-    $("#chat-input").focus();
-    if (unreadCount(id)) {
-      await must(sb.rpc("mark_read", { p_from: id }));
-      markReadHere(id);
-    }
+    loadedLogs.add(id);
+    const log = logOf(id);
+    const known = new Set(log.map((m) => m.id));
+    for (const m of rows) if (!known.has(m.id)) log.push(m);
+    log.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    await fetchReplyTargets(log);
+    if (chatWith === id) renderChat();
   } catch (err) {
     toast(explain(err), true);
   }
 }
 
-function markReadHere(from) {
+function closeChat() {
+  if (chatWith) chatDrafts.set(chatWith, $("#chat-input").value);
+  chatWith = null;
+  replyTo = null;
+  $("#inbox").classList.remove("chatting");
+  renderInbox();
+}
+
+/** Marks what that person sent me as read: here at once, in the database right after. */
+function markRead(from) {
   const now = new Date().toISOString();
-  for (const m of [...inbox, ...chatLog]) if (m.sender === from && m.recipient === me.id && !m.read_at) m.read_at = now;
+  for (const m of inbox) if (m.sender === from && m.recipient === me.id && !m.read_at) m.read_at = now;
+  for (const m of logs.get(from) || []) if (m.sender === from && !m.read_at) m.read_at = now;
   renderUnread();
-  if (current === "inbox") renderInbox();
+  if (current === "inbox") renderPeopleList();
   if (current === "home") renderHomeMessages();
+  sb.rpc("mark_read", { p_from: from }).then(() => {}, () => {});
+}
+
+function msgDay(m) {
+  return new Date(m.created_at).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
 }
 
 function renderChat() {
   const p = team.find((x) => x.id === chatWith);
-  $("#chat-with").textContent = p ? p.display_name : "Messages";
+  const head = $("#chat-with");
+  head.textContent = "";
+  if (p) head.append(avatar(p.display_name), p.display_name);
+  else head.textContent = "Messages";
   $("#chat-form").hidden = !p;
-  const log = $("#chat-log");
-  log.textContent = "";
+  $("#chat-new").hidden = true;
+  const box = $("#chat-log");
+  box.textContent = "";
   if (!p) {
-    if (dmReady && team.length) log.append(el("p", "empty", "Pick someone to write to them."));
+    if (dmReady && team.length) box.append(el("p", "empty", "Pick someone to write to them."));
     return;
   }
-  if (!chatLog.length) log.append(el("p", "empty", `No messages with ${p.display_name} yet. Say hello!`));
-  const lastMine = chatLog.filter((m) => m.sender === me.id).pop();
+  const log = logOf(p.id);
+  if (!log.length) box.append(el("p", "empty", `No messages with ${p.display_name} yet. Say hello!`));
   let day = "";
-  for (const m of chatLog) {
-    const d = new Date(m.created_at).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
-    if (d !== day) { log.append(el("div", "chat-day muted small", d)); day = d; }
-    const mine = m.sender === me.id;
-    const row = el("div", "msg" + (mine ? " mine" : ""));
-    const meta = el("div", "msg-meta muted small",
-      new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) + (m === lastMine && m.read_at ? " · seen" : ""));
-    meta.title = new Date(m.created_at).toLocaleString();
-    row.append(el("div", "bubble", m.body), meta);
-    log.append(row);
+  for (const m of log) {
+    if (msgDay(m) !== day) { day = msgDay(m); box.append(el("div", "chat-day muted small", day)); }
+    box.append(bubbleEl(m));
   }
-  log.scrollTop = log.scrollHeight;
+  updateSeen();
+  box.scrollTop = box.scrollHeight;
 }
 
-async function sendMessage(e) {
+function bubbleEl(m) {
+  const mine = m.sender === me.id;
+  const row = el("div", "msg" + (mine ? " mine" : "") + (m.pending ? " sending" : "") + (m.failed ? " failed" : ""));
+  row.dataset.id = m.id;
+  const bubble = el("div", "bubble");
+  if (m.reply_to) bubble.append(quoteEl(m.reply_to));
+  bubble.append(el("div", "bubble-text", m.body));
+  const foot = el("div", "msg-foot small");
+  const meta = el("span", "msg-meta muted");
+  meta.textContent = m.pending ? "Sending…" : m.failed ? "⚠ Not sent"
+    : new Date(m.created_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  meta.title = new Date(m.created_at).toLocaleString();
+  foot.append(meta);
+  if (m.failed) {
+    const retry = el("button", "link small", "Try again");
+    retry.type = "button";
+    retry.addEventListener("click", () => deliver(m));
+    foot.append(retry);
+  } else if (!m.pending) {
+    const reply = el("button", "msg-reply link small", "↩ Reply");
+    reply.type = "button";
+    reply.addEventListener("click", () => startReply(m));
+    foot.append(reply);
+  }
+  row.append(bubble, foot);
+  return row;
+}
+
+function quoteEl(id) {
+  const q = findMsg(id);
+  const b = el("button", "quote");
+  b.type = "button";
+  b.append(el("span", "quote-who", q ? (q.sender === me.id ? "You" : q.sender_name) : "Earlier message"),
+    el("span", "quote-text", q ? q.body : "(not loaded)"));
+  b.title = "Show that message";
+  b.addEventListener("click", () => {
+    const row = $(`#chat-log .msg[data-id="${id}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    row.classList.remove("flash");
+    void row.offsetWidth; // restart the animation
+    row.classList.add("flash");
+  });
+  return b;
+}
+
+/** "· seen" under the last message of mine the other person has read. */
+function updateSeen() {
+  const box = $("#chat-log");
+  for (const s of $$(".seen", box)) s.remove();
+  const last = logOf(chatWith).filter((m) => m.sender === me.id && m.read_at).pop();
+  const row = last && $(`.msg[data-id="${last.id}"] .msg-meta`, box);
+  if (row) row.after(el("span", "seen muted", "· seen"));
+}
+
+function nearBottom(box) { return box.scrollHeight - box.scrollTop - box.clientHeight < 80; }
+
+/** Adds one message to the open conversation without redrawing the rest. */
+function appendMessage(m) {
+  if (current !== "inbox" || chatWith !== otherOf(m)) return;
+  const box = $("#chat-log");
+  const stick = m.sender === me.id || nearBottom(box);
+  $(".empty", box)?.remove();
+  const log = logOf(chatWith);
+  const before = log[log.indexOf(m) - 1];
+  if (!before || msgDay(before) !== msgDay(m)) box.append(el("div", "chat-day muted small", msgDay(m)));
+  box.append(bubbleEl(m));
+  updateSeen();
+  if (stick) box.scrollTop = box.scrollHeight;
+  else $("#chat-new").hidden = false;
+}
+
+function redrawMessage(oldId, m) {
+  const row = $(`#chat-log .msg[data-id="${oldId}"]`);
+  if (row) row.replaceWith(bubbleEl(m));
+  updateSeen();
+  if (current === "inbox") renderPeopleList();
+}
+
+function startReply(m) {
+  replyTo = m;
+  renderReplyBar();
+  $("#chat-input").focus();
+}
+
+function renderReplyBar() {
+  const bar = $("#reply-bar");
+  bar.hidden = !replyTo || !chatWith;
+  if (bar.hidden) return;
+  $(".quote-who", bar).textContent = `Replying to ${replyTo.sender === me.id ? "yourself" : replyTo.sender_name}`;
+  $(".quote-text", bar).textContent = replyTo.body;
+}
+
+/** Shows the message at once and sends it in the background, so typing never waits for the server. */
+function sendMessage(e) {
   e.preventDefault();
   const input = $("#chat-input");
   const body = input.value.trim();
   if (!body || !chatWith) return;
-  const btn = $("#chat-send");
-  btn.disabled = true;
+  const to = chatWith;
+  const m = { id: `tmp-${++tmpSeq}`, sender: me.id, sender_name: me.display_name, recipient: to, body,
+              reply_to: replyTo?.id ?? null, created_at: new Date().toISOString(), read_at: null, pending: true };
+  input.value = "";
+  chatDrafts.delete(to);
+  replyTo = null;
+  renderReplyBar();
+  logOf(to).push(m); // before the inbox, which logOf may be built from
+  inbox.unshift(m);
+  appendMessage(m);
+  renderPeopleList();
+  deliver(m);
+}
+
+async function deliver(m) {
+  const oldId = m.id;
+  if (m.failed) { m.failed = false; m.pending = true; redrawMessage(oldId, m); }
+  const row = { recipient: m.recipient, body: m.body };
+  if (m.reply_to) row.reply_to = m.reply_to;
   try {
-    const m = await must(sb.from("messages").insert({ recipient: chatWith, body }).select().single());
-    input.value = "";
-    if (!chatLog.some((x) => x.id === m.id)) chatLog.push(m);
-    inbox.unshift(m);
-    renderInbox();
-    input.focus();
+    const saved = await must(sb.from("messages").insert(row).select().single());
+    Object.assign(m, saved);
+    delete m.pending;
   } catch (err) {
+    m.pending = false;
+    m.failed = true;
     toast(explain(err), true);
-  } finally {
-    btn.disabled = false;
   }
+  redrawMessage(oldId, m);
 }
 
 function subscribeInbox() {
@@ -1004,26 +1271,29 @@ function subscribeInbox() {
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: `recipient=eq.${me.id}` },
       (payload) => receive(payload.new))
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages", filter: `sender=eq.${me.id}` }, (payload) => {
-      for (const m of [...inbox, ...chatLog]) if (m.id === payload.new.id) m.read_at = payload.new.read_at;
-      if (current === "inbox") renderChat();
+      for (const list of [inbox, ...logs.values()]) {
+        for (const m of list) if (m.id === payload.new.id) m.read_at = payload.new.read_at;
+      }
+      if (current === "inbox" && chatWith === payload.new.recipient) updateSeen();
     })
     .subscribe();
 }
 
 async function receive(m) {
   if (inbox.some((x) => x.id === m.id)) return;
+  if (!people.some((p) => p.id === m.sender)) await loadPeople().catch(() => {});
+  if (logs.has(m.sender)) logs.get(m.sender).push(m);
   inbox.unshift(m);
-  if (!team.some((p) => p.id === m.sender)) {
-    team = await must(sb.from("profiles").select("id, display_name, is_admin").neq("id", me.id).order("display_name")).catch(() => team);
-  }
+  if (m.reply_to) await fetchReplyTargets([m]).catch(() => {});
   if (current === "inbox" && chatWith === m.sender) {
-    chatLog.push(m);
-    if (!document.hidden) sb.rpc("mark_read", { p_from: m.sender }).then(({ error }) => { if (!error) markReadHere(m.sender); });
-  } else {
-    toast(`✉ ${m.sender_name}: ${m.body.length > 80 ? m.body.slice(0, 80) + "…" : m.body}`);
+    appendMessage(m);
+    if (!document.hidden) markRead(m.sender);
+  } else if (current !== "inbox") {
+    // on the messages page the list shows it; a pop-up there would cover the message box
+    toast(`✉ ${m.sender_name}${m.reply_to ? " replied" : ""}: ${m.body.length > 80 ? m.body.slice(0, 80) + "…" : m.body}`);
   }
   renderUnread();
-  if (current === "inbox") renderInbox();
+  if (current === "inbox") renderPeopleList();
   if (current === "home") renderHomeMessages();
 }
 
@@ -1798,13 +2068,13 @@ function init() {
     }, 350);
   });
   $("#review-all").addEventListener("click", () => {
-    view = { review: true };
+    view = { review: true, author: null };
     $("#crumb").textContent = "Whole project";
-    $("#title").textContent = "Waiting for review";
     $("#search").value = "";
     renderClaim();
     renderScenes();
-    loadLines();
+    pickReviewer(null);
+    loadReviewQueue();
   });
   $("#claim-btn").addEventListener("click", toggleClaim);
   $("#admin-btn").addEventListener("click", openAdmin);
@@ -1818,8 +2088,16 @@ function init() {
   $("#chat-form").addEventListener("submit", sendMessage);
   $("#chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#chat-form").requestSubmit(); }
+    if (e.key === "Escape" && replyTo) { replyTo = null; renderReplyBar(); }
   });
-  $("#chat-back").addEventListener("click", () => { chatWith = null; $("#inbox").classList.remove("chatting"); renderInbox(); });
+  $("#chat-input").addEventListener("input", (e) => { if (chatWith) chatDrafts.set(chatWith, e.target.value); });
+  $("#chat-back").addEventListener("click", closeChat);
+  $("#reply-cancel").addEventListener("click", () => { replyTo = null; renderReplyBar(); $("#chat-input").focus(); });
+  $("#chat-new").addEventListener("click", () => { const box = $("#chat-log"); box.scrollTop = box.scrollHeight; $("#chat-new").hidden = true; });
+  $("#chat-log").addEventListener("scroll", (e) => { if (nearBottom(e.target)) $("#chat-new").hidden = true; });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && current === "inbox" && chatWith && unreadCount(chatWith)) markRead(chatWith);
+  });
   $("#dash-week").addEventListener("change", (e) => pickWeek(e.target.value));
   $("#dash-copy").addEventListener("click", copyReport);
   $("#heat-measure").addEventListener("change", () => { if (dash) renderHeat(); });
