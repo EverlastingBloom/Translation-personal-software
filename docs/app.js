@@ -216,10 +216,13 @@ async function start() {
   if (!prof) { showOnly("#noaccess"); return; }
   me = prof;
   $("#me").textContent = me.display_name;
+  $("#me-name").textContent = me.display_name;
+  $("#me-email").textContent = me.email;
   renderPower();
   setView("home", false);
   showOnly("#app");
   await Promise.all([loadProjects(), loadInbox()]);
+  renderPower(); // the avatar's colour needs the team
   subscribeInbox();
   setView("home");
 }
@@ -274,14 +277,25 @@ function renderPower() {
   const on = actingAdmin();
   const b = $("#power-btn");
   b.hidden = !me.is_admin;
-  b.textContent = on ? "🛡 Admin on" : "🛡 Admin off";
-  b.classList.toggle("off", !on);
-  b.setAttribute("aria-pressed", String(on));
-  b.title = on ? "Your admin powers are on. Click to switch them off and translate and vote like everyone else."
-               : "Your admin powers are off: you translate and vote like everyone else. Click to switch them back on.";
-  $("#me").title = `${me.email}${me.is_admin ? (on ? " · admin" : " · admin (powers off)") : me.can_review ? " · can vote" : ""}`;
+  b.setAttribute("aria-checked", String(on));
+  b.title = on ? "On: you approve directly and manage the team. Off: you translate and vote like everyone else."
+               : "Off: you translate and vote like everyone else. Switch on to approve directly and manage the team.";
+  const role = me.is_admin ? (on ? "Admin" : "Admin · powers off") : me.can_review ? "Translator · can vote" : "Translator";
+  $("#me-role").textContent = role;
+  const av = $("#me-avatar");
+  av.className = `avatar p${colorSlot(me.display_name)}`;
+  av.textContent = initials(me.display_name);
+  $("#me-btn").classList.toggle("admin-on", on);
+  $("#me-btn").title = `${me.display_name} · ${role}`;
   $("#admin-btn").hidden = !on;
   $("#dash-btn").hidden = !on;
+}
+
+// ---------- the account menu ----------
+function toggleMenu(open = $("#me-menu").hidden) {
+  $("#me-menu").hidden = !open;
+  $("#me-btn").setAttribute("aria-expanded", String(open));
+  if (open) $("#me-menu .menu-item:not([hidden])")?.focus();
 }
 
 async function togglePower() {
@@ -301,6 +315,7 @@ async function togglePower() {
       if (view.review) await loadReviewQueue();
       await loadLines();
     }
+    toggleMenu(false);
     toast(on ? "Admin powers on – you can approve directly again." : "Admin powers off – you now translate and vote like everyone else.");
   } catch (err) {
     toast(explain(err), true);
@@ -384,7 +399,10 @@ function progressText(c) {
 
 function renderProgress() {
   const c = sum(stats);
-  $("#progress-text").textContent = progressText(c);
+  const text = progressText(c);
+  $("#progress-pct").textContent = !c.total ? "" : !c.untranslated && !c.review ? "✓" : `${Math.floor(100 * c.done / c.total)}%`;
+  $("#progress-pct").title = text;
+  $("#progress").title = text;
   $("#progress .done").style.width = c.total ? `${100 * c.done / c.total}%` : "0";
   $("#progress .review").style.width = c.total ? `${100 * c.review / c.total}%` : "0";
   renderGroupStats();
@@ -986,10 +1004,58 @@ function bigPercent(c) {
   return box;
 }
 
+// ---------- welcome: where you are, and how long the project has been running ----------
+/** "Western Indonesia Time · Jakarta, Asia · GMT+7 · 14:32" for the viewer's own time zone. */
+function timeZoneText(now = new Date()) {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  const zoneName = (style) => new Intl.DateTimeFormat(undefined, { timeZoneName: style })
+    .formatToParts(now).find((p) => p.type === "timeZoneName")?.value || "";
+  const long = zoneName("long"), offset = zoneName("shortOffset");
+  const [region, ...rest] = tz.split("/");
+  const place = rest.length ? `${rest.reverse().join(", ").replace(/_/g, " ")}, ${region}` : tz;
+  const time = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return [/^GMT|^UTC/.test(long) ? "" : long, place, offset, time].filter(Boolean).join(" · ");
+}
+
+/** When the project started: the repository's first commit (config.js), else the first project on the site. */
+function projectStart() {
+  const set = window.SITE?.started ? new Date(window.SITE.started) : null;
+  if (set && !isNaN(set)) return { at: set, what: "the project's first commit" };
+  const first = projects.map((p) => p.created_at).sort()[0];
+  return first ? { at: new Date(first), what: "the first game file on this site" } : null;
+}
+
+function renderClock() {
+  const start = projectStart();
+  $("#project-clock").hidden = !start;
+  if (!start) return;
+  let left = Math.max(0, Math.floor((Date.now() - start.at) / 1000));
+  const box = $("#clock-value");
+  box.textContent = "";
+  for (const [one, many, size, pad] of [["year", "years", 365 * 86400, false], ["day", "days", 86400, false],
+                                        ["hour", "hours", 3600, true], ["minute", "minutes", 60, true], ["second", "seconds", 1, true]]) {
+    const n = Math.floor(left / size);
+    left -= n * size;
+    if (one === "year" && !n) continue; // years only once there is one
+    const unit = el("span", "clock-unit");
+    unit.append(el("span", "clock-num", pad ? String(n).padStart(2, "0") : String(n)), el("span", "clock-name", n === 1 ? one : many));
+    box.append(unit);
+  }
+  box.setAttribute("aria-label", `${box.innerText.replace(/\n/g, " ")}`);
+  $("#clock-since").textContent = `since ${start.at.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })} – ${start.what}`;
+}
+
+function tickHome() {
+  if (current !== "home" || document.hidden || !me) return;
+  $("#home-tz").textContent = `🌏 ${timeZoneText()}`;
+  renderClock();
+}
+
 async function renderHome() {
   const h = new Date().getHours();
   $("#home-hello").textContent = `${h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"}, ${me.display_name}`;
   $("#home-date").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  tickHome();
   renderHomeMessages();
   const cards = $("#home-projects");
   if (!projects.length) {
@@ -2225,7 +2291,19 @@ function init() {
   $("#login-toggle").addEventListener("click", (e) => { e.preventDefault(); setSignUpMode(!signUpMode); });
   $("#login-forgot").addEventListener("click", forgotPassword);
   $("#newpass-form").addEventListener("submit", saveNewPassword);
-  $("#logout").addEventListener("click", () => sb.auth.signOut());
+  $("#logout").addEventListener("click", () => { toggleMenu(false); sb.auth.signOut(); });
+  $("#me-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(); });
+  $("#me-menu").addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", () => { if (!$("#me-menu").hidden) toggleMenu(false); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#me-menu").hidden) { toggleMenu(false); $("#me-btn").focus(); return; }
+    // "/" jumps to the search box while translating, unless you're typing somewhere
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+    if (e.key === "/" && !typing && current === "translate" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      $("#search").focus();
+    }
+  });
   $("#noaccess-out").addEventListener("click", () => sb.auth.signOut());
   $("#project-select").addEventListener("change", (e) => {
     const p = projects.find((x) => x.id === Number(e.target.value));
@@ -2265,7 +2343,7 @@ function init() {
     loadReviewQueue();
   });
   $("#claim-btn").addEventListener("click", toggleClaim);
-  $("#admin-btn").addEventListener("click", openAdmin);
+  $("#admin-btn").addEventListener("click", () => { toggleMenu(false); openAdmin(); });
   $$("[data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
   $$(".tab").forEach((tab) => tab.addEventListener("click", () => {
     $$(".tab").forEach((t) => t.classList.toggle("active", t === tab));
@@ -2275,6 +2353,7 @@ function init() {
   $("#home-btn").addEventListener("click", () => setView("home"));
   $("#power-btn").addEventListener("click", togglePower);
   $("#update-reload").addEventListener("click", reloadSite);
+  setInterval(tickHome, 1000); // the clock and the time on the welcome page
   checkForUpdate();
   setInterval(checkForUpdate, 5 * 60 * 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) checkForUpdate(); });

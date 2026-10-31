@@ -139,9 +139,15 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
 **Supabase** (free) as the database.
 
 - **Invite only.** The admin adds emails in the admin panel; nobody else can create an account.
-- **Welcome page.** After signing in you land on a home page: how far each project is (percentage
-  finished and a progress bar), the scenes you've claimed, what you wrote this week, what's waiting
-  for review, and your latest messages. **Continue translating** opens the project.
+- **Welcome page.** After signing in you land on a home page: your time zone and local time, how
+  long the project has been running (a live clock counting from the repository's first commit,
+  set as `started` in `docs/config.js`), how far each project is (percentage finished and a
+  progress bar), the scenes you've claimed, what you wrote this week, what's waiting for review,
+  and your latest messages. **Continue translating** opens the project.
+- **The header** has the pages in the middle (Home, Translate, Messages, Dashboard), the search
+  on the right while translating (press **/** to jump into it), and your initials: click them for
+  your account, the admin power switch, the Admin panel and Sign out. The thin line along the
+  bottom of the header is the project's progress (hover it for the numbers).
 - **Messages.** Write directly to anyone on the team. Only the two of you can read a conversation;
   new messages arrive live, and the *Messages* button shows how many are unread. A message shows
   up the moment you press Enter (and offers *Try again* if it couldn't be sent). **↩ Reply** quotes
@@ -159,7 +165,7 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   still needs and who voted; the **🗳 Needs your vote** tab lists what you haven't voted on yet.
   Changing the words of a suggestion clears its votes. The **admin** doesn't vote: they can
   approve or turn down any version directly, at any time.
-- **Admin power switch.** The **🛡 Admin on/off** button next to the admin's name switches their
+- **Admin power switch.** *Admin powers* in the menu under the admin's initials switches their
   admin powers off: they then translate and vote like everyone else (and count as a voter), and
   the Admin panel, Dashboard and direct approving are gone until they switch it back on.
 - **Notes** are a small conversation on each line. **✋ Claim** tells the others you're on a scene

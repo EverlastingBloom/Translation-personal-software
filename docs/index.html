@@ -50,35 +50,45 @@
   <header class="topbar">
     <div class="brand">
       <button id="home-btn" class="logo" type="button" title="Home" aria-label="Home">文A</button>
-      <span class="brand-text for-project">
+      <span class="brand-project for-project">
         <select id="project-select" class="project-select" aria-label="Project"></select>
-        <span id="progress-text" class="muted small"></span>
+        <span id="progress-pct" class="pct"></span>
       </span>
       <strong class="brand-home">Team Translation</strong>
     </div>
-    <div class="progress for-project" id="progress" title="Approved / waiting for review / untranslated">
-      <span class="bar done"></span><span class="bar review"></span>
-    </div>
+    <nav class="nav" aria-label="Pages">
+      <button type="button" data-go="home" title="Home"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9.5h13V10"/></svg><span>Home</span></button>
+      <button type="button" data-go="translate" title="Translate"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M8.5 4v2M6 6c.8 3.2 3 5.6 6 7M11 6c-.8 3.4-3.2 6-6.5 7.5"/><path d="m12.5 20 4-9 4 9M14 17h5"/></svg><span>Translate</span></button>
+      <button type="button" data-go="inbox" title="Messages"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v10H9l-5 4z"/></svg><span>Messages</span><span id="unread" class="badge" hidden></span></button>
+      <button id="dash-btn" type="button" data-go="dash" title="Dashboard" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V11M12 20V5M19 20v-6"/></svg><span>Dashboard</span></button>
+    </nav>
     <div class="tools">
-      <input id="search" class="for-lines" type="search" placeholder="Search text, translation, speaker or key…" autocomplete="off">
-      <select id="filter" class="for-lines" aria-label="Show lines">
-        <option value="">All lines</option>
-        <option value="todo">To do (not approved)</option>
-        <option value="review">Waiting for review</option>
-        <option value="untranslated">Untranslated</option>
-        <option value="done">Approved</option>
-      </select>
-      <nav class="nav" aria-label="Pages">
-        <button class="ghost" type="button" data-go="home">Home</button>
-        <button class="ghost" type="button" data-go="translate">Translate</button>
-        <button class="ghost" type="button" data-go="inbox">Messages <span id="unread" class="badge" hidden></span></button>
-        <button id="dash-btn" class="ghost" type="button" data-go="dash" hidden>Dashboard</button>
-      </nav>
-      <button id="admin-btn" class="ghost" type="button" hidden>Admin</button>
-      <button id="power-btn" class="small power" type="button" hidden aria-pressed="true"></button>
-      <span id="me" class="me"></span>
-      <button id="logout" class="ghost" type="button">Sign out</button>
+      <label class="hsearch for-lines" title="Search (press /)">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg>
+        <input id="search" type="search" placeholder="Search…" aria-label="Search text, translation, speaker or key" autocomplete="off">
+        <kbd>/</kbd>
+      </label>
+      <div class="account">
+        <button id="me-btn" class="me-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="me-menu">
+          <span id="me-avatar" class="avatar"></span>
+          <span id="me" class="me"></span>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
+        </button>
+        <div id="me-menu" class="menu" role="menu" hidden>
+          <div class="menu-head">
+            <strong id="me-name"></strong>
+            <span id="me-email" class="muted small"></span>
+            <span id="me-role" class="small"></span>
+          </div>
+          <button id="power-btn" class="menu-item" type="button" role="menuitemcheckbox" aria-checked="true" hidden>
+            <span>Admin powers</span><span class="switch" aria-hidden="true"></span>
+          </button>
+          <button id="admin-btn" class="menu-item" type="button" role="menuitem" hidden>Admin panel…</button>
+          <button id="logout" class="menu-item" type="button" role="menuitem">Sign out</button>
+        </div>
+      </div>
     </div>
+    <div class="progress topline for-project" id="progress"><span class="bar done"></span><span class="bar review"></span></div>
   </header>
 
   <!-- ======================= welcome ======================= -->
@@ -86,7 +96,13 @@
     <div class="home-head">
       <div id="home-date" class="muted small"></div>
       <h2 id="home-hello">Welcome</h2>
+      <div id="home-tz" class="home-tz"></div>
     </div>
+    <section id="project-clock" class="card project-clock" hidden>
+      <div class="muted small">The project has been running for</div>
+      <div id="clock-value" class="clock-value"></div>
+      <div id="clock-since" class="muted small"></div>
+    </section>
     <section id="home-overall" class="card home-overall" hidden></section>
     <div id="home-projects" class="project-cards"></div>
     <div id="home-tiles" class="tiles home-tiles"></div>
@@ -139,7 +155,16 @@
           <div id="crumb" class="muted small"></div>
           <h2 id="title">Pick a scene on the left</h2>
         </div>
-        <button id="claim-btn" class="ghost" type="button" hidden></button>
+        <div class="content-tools">
+          <select id="filter" aria-label="Show lines">
+            <option value="">All lines</option>
+            <option value="todo">To do (not approved)</option>
+            <option value="review">Waiting for review</option>
+            <option value="untranslated">Untranslated</option>
+            <option value="done">Approved</option>
+          </select>
+          <button id="claim-btn" class="ghost" type="button" hidden></button>
+        </div>
       </div>
       <div id="review-tabs" class="review-tabs" role="tablist" aria-label="Whose translations" hidden></div>
       <div id="lines" class="lines"></div>
