@@ -48,6 +48,9 @@ function explain(err) {
   if (/weekly_activity|weekly_progress|week_scenes/i.test(m) && /function/i.test(m)) {
     return "The dashboard needs a database update: run docs/supabase/update-2-dashboard.sql in Supabase → SQL Editor.";
   }
+  if (/set_admin_power/i.test(m)) {
+    return "Switching admin powers needs a database update: run docs/supabase/update-6-admin-power.sql in Supabase → SQL Editor.";
+  }
   if (/need_my_vote|function public\.vote|p_unvoted/i.test(m)) {
     return "Voting isn't set up yet: the admin runs docs/supabase/update-5-votes.sql in Supabase → SQL Editor.";
   }
@@ -108,6 +111,9 @@ function withTags(text) {
   frag.append(text.slice(last));
   return frag;
 }
+
+/** The admin with their admin powers on (they can switch them off and act like everyone else). */
+function actingAdmin() { return !!me?.is_admin && me.admin_active !== false; }
 
 function isOwn(v) {
   return v.imported ? v.author_name.toLowerCase() === me.display_name.toLowerCase() : v.author === me.id;
@@ -210,9 +216,7 @@ async function start() {
   if (!prof) { showOnly("#noaccess"); return; }
   me = prof;
   $("#me").textContent = me.display_name;
-  $("#me").title = `${me.email}${me.is_admin ? " · admin" : me.can_review ? " · can vote" : ""}`;
-  $("#admin-btn").hidden = !me.is_admin;
-  $("#dash-btn").hidden = !me.is_admin;
+  renderPower();
   setView("home", false);
   showOnly("#app");
   await Promise.all([loadProjects(), loadInbox()]);
@@ -238,6 +242,46 @@ function setView(name, render = true) {
   if (name === "home") renderHome().catch((err) => toast(explain(err), true));
   if (name === "dash") loadDash().catch((err) => toast(explain(err), true));
   if (name === "inbox") renderInbox();
+}
+
+// ---------- the admin's power switch ----------
+function renderPower() {
+  const on = actingAdmin();
+  const b = $("#power-btn");
+  b.hidden = !me.is_admin;
+  b.textContent = on ? "🛡 Admin on" : "🛡 Admin off";
+  b.classList.toggle("off", !on);
+  b.setAttribute("aria-pressed", String(on));
+  b.title = on ? "Your admin powers are on. Click to switch them off and translate and vote like everyone else."
+               : "Your admin powers are off: you translate and vote like everyone else. Click to switch them back on.";
+  $("#me").title = `${me.email}${me.is_admin ? (on ? " · admin" : " · admin (powers off)") : me.can_review ? " · can vote" : ""}`;
+  $("#admin-btn").hidden = !on;
+  $("#dash-btn").hidden = !on;
+}
+
+async function togglePower() {
+  const on = !actingAdmin();
+  const b = $("#power-btn");
+  b.disabled = true;
+  try {
+    await must(sb.rpc("set_admin_power", { p_on: on }));
+    me.admin_active = on;
+    const mine = people.find((p) => p.id === me.id);
+    if (mine) mine.admin_active = on;
+    renderPower();
+    if (!on && $("#admin").open) $("#admin").close();
+    if (!on && current === "dash") setView("home");
+    else if (current === "home") renderHome().catch(() => {});
+    if (current === "translate" && view) {
+      if (view.review) await loadReviewQueue();
+      await loadLines();
+    }
+    toast(on ? "Admin powers on – you can approve directly again." : "Admin powers off – you now translate and vote like everyone else.");
+  } catch (err) {
+    toast(explain(err), true);
+  } finally {
+    b.disabled = false;
+  }
 }
 
 /** Open a project (and maybe one scene) on the translating page. */
@@ -500,9 +544,9 @@ function renderVersion(l, v) {
 
   const actions = el("div", "version-actions");
   const own = isOwn(v);
-  const mayDecide = me.is_admin; // everyone else votes
+  const mayDecide = actingAdmin(); // everyone else votes
   if (v.status === "pending") {
-    if (me.is_admin) {
+    if (actingAdmin()) {
       const ok = el("button", "small primary", "✓ Approve");
       ok.type = "button";
       ok.title = "Approve now, without waiting for the vote";
@@ -588,7 +632,7 @@ function renderNotes(l) {
   for (const n of l.notes) {
     const row = el("div", "note");
     row.append(el("strong", "", n.author_name || "?"), el("span", "note-body", n.body), el("span", "muted small", timeAgo(n.created_at)));
-    if (n.author === me.id || me.is_admin) {
+    if (n.author === me.id || actingAdmin()) {
       const del = el("button", "link small", "delete");
       del.type = "button";
       del.addEventListener("click", async () => {
@@ -651,9 +695,11 @@ function isAuthorOf(v, p) {
 }
 
 /** Who may vote on this version: everyone who can vote, except the admin and its author. */
-function votePool(v) { return people.filter((p) => p.can_review && !p.is_admin && !isAuthorOf(v, p)); }
+function votePool(v) {
+  return people.filter((p) => (p.can_review || p.is_admin) && !(p.is_admin && p.admin_active !== false) && !isAuthorOf(v, p));
+}
 
-function canVoteOn(v) { return me.can_review && !me.is_admin && !isAuthorOf(v, me); }
+function canVoteOn(v) { return (me.can_review || me.is_admin) && !actingAdmin() && !isAuthorOf(v, me); }
 
 function voteCount(v) {
   const pool = votePool(v);
@@ -747,7 +793,7 @@ async function loadReviewQueue() {
     reviewQueueReady = false; // database without update 4: only the "Everyone" list
   }
   myVotes = null;
-  if (me.can_review && !me.is_admin) {
+  if ((me.can_review || me.is_admin) && !actingAdmin()) {
     try {
       const rows = await must(sb.rpc("need_my_vote"));
       myVotes = Number(rows.find((r) => Number(r.project_id) === project.id)?.lines || 0);
@@ -927,7 +973,7 @@ async function renderHome() {
     return;
   }
   const reviewer = me.can_review || me.is_admin;
-  const voter = me.can_review && !me.is_admin;
+  const voter = reviewer && !actingAdmin();
   const [prog, myClaims, waiting, toReview, thisWeek, voteRows] = await Promise.all([
     projectProgress(),
     must(sb.from("claims").select("*").eq("user_id", me.id)),
@@ -1029,7 +1075,7 @@ let people = [];          // everyone on the team (me too), in the order they jo
 let team = [];            // everyone else, by name
 
 async function loadPeople() {
-  people = await must(sb.from("profiles").select("id, display_name, is_admin, can_review, created_at").order("created_at"));
+  people = await must(sb.from("profiles").select("*").order("created_at"));
   team = people.filter((p) => p.id !== me.id).sort((a, b) => a.display_name.localeCompare(b.display_name));
 }
 
@@ -2196,6 +2242,7 @@ function init() {
   }));
   $$("[data-go]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.go)));
   $("#home-btn").addEventListener("click", () => setView("home"));
+  $("#power-btn").addEventListener("click", togglePower);
   $("#chat-form").addEventListener("submit", sendMessage);
   $("#chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#chat-form").requestSubmit(); }

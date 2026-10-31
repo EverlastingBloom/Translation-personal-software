@@ -18,6 +18,7 @@ create table public.profiles (
   email        text not null,
   display_name text not null,
   is_admin     boolean not null default false,
+  admin_active boolean not null default true,  -- the admin can switch their admin powers off
   can_review   boolean not null default true,
   created_at   timestamptz not null default now()
 );
@@ -138,11 +139,21 @@ $$ select exists (select 1 from profiles where id = auth.uid()) $$;
 
 create function public.is_admin() returns boolean
 language sql stable security definer set search_path = public as
-$$ select exists (select 1 from profiles where id = auth.uid() and is_admin) $$;
+$$ select exists (select 1 from profiles where id = auth.uid() and is_admin and admin_active) $$;
 
 create function public.can_review() returns boolean
 language sql stable security definer set search_path = public as
 $$ select exists (select 1 from profiles where id = auth.uid() and (can_review or is_admin)) $$;
+
+-- The admin switches their admin powers off (and acts as a normal translator and voter) or on again.
+create function public.set_admin_power(p_on boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not exists (select 1 from profiles where id = auth.uid() and is_admin) then
+    raise exception 'Only the admin has admin powers to switch.';
+  end if;
+  update profiles set admin_active = p_on where id = auth.uid();
+end $$;
 
 -- A new account: refused unless the email was invited.
 create function public.handle_new_user() returns trigger
@@ -296,7 +307,8 @@ begin
   end if;
 end $$;
 
--- Who may vote on a version: everyone who "can vote", except the admin and the author.
+-- Who may vote on a version: everyone who "can vote" (an admin with powers off too), except an
+-- acting admin and the author.
 -- Approved once agree >= ceil(2/3 of them); turned down once 2/3 can't be reached any more.
 create function private.settle_votes(p_id bigint) returns text
 language plpgsql security definer set search_path = public as $$
@@ -305,12 +317,12 @@ begin
   select * into v from versions where id = p_id for update;
   if v.id is null or v.status <> 'pending' then return 'decided'; end if;
   select count(*) into pool from profiles p
-    where p.can_review and not p.is_admin and not private.is_author(v, p.id);
+    where (p.can_review or p.is_admin) and not (p.is_admin and p.admin_active) and not private.is_author(v, p.id);
   if pool = 0 then return 'admin'; end if;
   need := ceil(pool * 2 / 3.0);
   select count(*) filter (where x.agree), count(*) filter (where not x.agree) into yes, no
     from votes x join profiles p on p.id = x.voter
-    where x.version_id = p_id and p.can_review and not p.is_admin and not private.is_author(v, p.id);
+    where x.version_id = p_id and (p.can_review or p.is_admin) and not (p.is_admin and p.admin_active) and not private.is_author(v, p.id);
   if yes >= need then
     perform private.decide_version(p_id, true, 'Team vote');
     return 'approved';
@@ -327,7 +339,7 @@ language plpgsql security definer set search_path = public as $$
 declare v versions; me profiles;
 begin
   select * into me from profiles where id = auth.uid();
-  if me.id is null or not me.is_admin then
+  if me.id is null or not (me.is_admin and me.admin_active) then
     raise exception 'Translations are approved by a 2/3 vote – only the admin approves directly.';
   end if;
   select * into v from versions where id = p_id;
@@ -340,7 +352,7 @@ language plpgsql security definer set search_path = public as $$
 declare v versions; me profiles;
 begin
   select * into me from profiles where id = auth.uid();
-  if me.id is null or not me.is_admin then
+  if me.id is null or not (me.is_admin and me.admin_active) then
     raise exception 'Translations are turned down by vote – only the admin decides directly.';
   end if;
   select * into v from versions where id = p_id;
@@ -355,7 +367,7 @@ language plpgsql security definer set search_path = public as $$
 declare v versions; me profiles;
 begin
   select * into me from profiles where id = auth.uid();
-  if me.id is null or not me.can_review or me.is_admin then
+  if me.id is null or not (me.can_review or me.is_admin) or (me.is_admin and me.admin_active) then
     raise exception 'Only people who can vote can vote (the admin approves directly).';
   end if;
   select * into v from versions where id = p_id for update;
@@ -378,7 +390,7 @@ language sql stable security definer set search_path = public as $$
   select v.project_id, count(distinct v.line_id)
   from versions v
   where v.status = 'pending'
-    and exists (select 1 from profiles p where p.id = auth.uid() and p.can_review and not p.is_admin)
+    and exists (select 1 from profiles p where p.id = auth.uid() and (p.can_review or p.is_admin) and not (p.is_admin and p.admin_active))
     and not private.is_author(v, auth.uid())
     and not exists (select 1 from votes x where x.version_id = v.id and x.voter = auth.uid())
   group by v.project_id

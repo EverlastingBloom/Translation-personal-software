@@ -258,6 +258,8 @@ button.logo:hover:not(:disabled) { filter: brightness(1.08); }
 .nav { display: flex; gap: 2px; flex-wrap: wrap; }
 .nav button { border-color: transparent; }
 .nav button.active { background: var(--panel-2); font-weight: 600; }
+.power { border-radius: 999px; border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.power.off { border-color: var(--border); color: var(--muted); font-weight: 400; }
 .badge {
   display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent);
   color: var(--accent-text); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;

@@ -159,6 +159,9 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   still needs and who voted; the **🗳 Needs your vote** tab lists what you haven't voted on yet.
   Changing the words of a suggestion clears its votes. The **admin** doesn't vote: they can
   approve or turn down any version directly, at any time.
+- **Admin power switch.** The **🛡 Admin on/off** button next to the admin's name switches their
+  admin powers off: they then translate and vote like everyone else (and count as a voter), and
+  the Admin panel, Dashboard and direct approving are gone until they switch it back on.
 - **Notes** are a small conversation on each line. **✋ Claim** tells the others you're on a scene
   (it doesn't lock it).
 - **Admin panel:** invite or remove people, who can vote, import a game file (with the desktop
@@ -175,6 +178,7 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   `update-1-admin-approves-own.sql`, `update-2-dashboard.sql` (the dashboard), `update-3-welcome-messages.sql` (messages and the
   welcome page's progress), `update-4-replies-review-tabs.sql` (replies, review tabs per person),
   `update-5-votes.sql` (approving by 2/3 vote),
+  `update-6-admin-power.sql` (the admin power switch),
   all in `docs/supabase/`.
 
 Set up once (admin):
