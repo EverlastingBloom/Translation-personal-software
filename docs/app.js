@@ -316,19 +316,39 @@ function setView(name, render = true) {
 // ---------- a newer version of the site ----------
 // An open tab keeps running the code it loaded. When the site is updated, offer a reload, so nobody
 // keeps using buttons the database no longer accepts.
+// The cheap check is the file's tag (ETag / Last-Modified), but GitHub Pages changes it on every
+// deploy – even when this file didn't change – and writes it as W/"…" for compressed copies. So a new
+// tag only means "look closer": the notice shows when the code itself is different.
 const SITE_FILES = ["./", "app.js", "style.css", "csv.js", "config.js"];
-let loadedTag = null;     // app.js as this tab loaded it (its ETag or Last-Modified)
+let loadedTag = null;     // app.js's tag as this tab last saw it
+let loadedHash = null;    // a fingerprint of the app.js this tab runs
 
-function tagOf(r) { return r.ok ? r.headers.get("etag") || r.headers.get("last-modified") : null; }
+function tagOf(r) {
+  const t = r.ok ? r.headers.get("etag") || r.headers.get("last-modified") : null;
+  return t ? t.replace(/^W\//, "") : null; // the same file, compressed or not
+}
+
+/** FNV-1a over the text: enough to tell two versions of a file apart. */
+function fingerprint(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return `${text.length}:${(h >>> 0).toString(16)}`;
+}
 
 async function checkForUpdate() {
   try {
-    if (loadedTag == null) {
-      loadedTag = tagOf(await fetch("app.js", { cache: "force-cache" })); // the copy this tab most likely runs
-      if (loadedTag == null) return;
+    if (loadedHash == null) { // the copy this tab most likely runs
+      const r = await fetch("app.js", { cache: "force-cache" });
+      if (!r.ok) return;
+      loadedTag = tagOf(r);
+      loadedHash = fingerprint(await r.text());
     }
-    const now = tagOf(await fetch("app.js", { method: "HEAD", cache: "no-store" }));
-    if (now && now !== loadedTag) $("#update-bar").hidden = false;
+    const tag = tagOf(await fetch("app.js", { method: "HEAD", cache: "no-store" }));
+    if (!tag || tag === loadedTag) return;
+    const r = await fetch("app.js", { cache: "no-store" }); // deployed again: did the code change?
+    if (!r.ok) return;
+    loadedTag = tag;
+    if (fingerprint(await r.text()) !== loadedHash) $("#update-bar").hidden = false;
   } catch { /* offline: try again later */ }
 }
 
