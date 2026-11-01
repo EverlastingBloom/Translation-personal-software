@@ -8,7 +8,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-180.png">
-<meta name="theme-color" content="#b4532a">
+<meta name="theme-color" content="#4f46e5">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Translation">
 <script>try { var t = localStorage.getItem("tt.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}</script>
@@ -126,14 +126,28 @@
       <div id="home-date" class="muted small"></div>
       <h2 id="home-hello">Welcome</h2>
       <div id="home-tz" class="home-tz"></div>
+      <div id="project-clock" class="home-clock" hidden>
+        <span class="muted">Project running</span>
+        <span id="clock-value" class="clock-value"></span>
+        <span id="clock-since" class="muted"></span>
+      </div>
     </div>
-    <section id="project-clock" class="card project-clock" hidden>
-      <div class="muted small">The project has been running for</div>
-      <div id="clock-value" class="clock-value"></div>
-      <div id="clock-since" class="muted small"></div>
-    </section>
     <div id="home-online" class="home-online" hidden></div>
-    <section id="home-goal" class="card goal-card"></section>
+    <section class="card dash-card activity-card">
+      <div class="card-head">
+        <h3>Activity</h3>
+        <span id="streak-chip" class="streak-chip" hidden></span>
+        <span class="seg" role="group" aria-label="Whose activity">
+          <button type="button" data-cal="me" aria-pressed="true">You</button>
+          <button type="button" data-cal="team" aria-pressed="false">Team</button>
+        </span>
+      </div>
+      <div id="calendar" class="calendar"></div>
+      <div class="cal-foot small">
+        <span id="cal-summary" class="muted"></span>
+        <span class="cal-legend muted" aria-hidden="true">Less <i class="l0"></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i> More</span>
+      </div>
+    </section>
     <section id="home-overall" class="card home-overall" hidden></section>
     <div id="home-projects" class="project-cards"></div>
     <div id="home-tiles" class="tiles home-tiles"></div>
@@ -190,12 +204,13 @@
 
   <div class="layout">
     <aside class="sidebar">
-      <label class="side-label" for="group-select">Section</label>
-      <select id="group-select"></select>
-      <div id="group-stats" class="group-stats small"></div>
+      <div class="side-head">
+        <span class="side-label">Sections</span>
+        <span id="group-stats" class="small muted"></span>
+      </div>
       <button id="review-all" class="ghost small review-all" type="button">⚑ Everything waiting for review</button>
-      <input id="scene-filter" type="search" placeholder="Filter scenes…" autocomplete="off">
-      <nav id="scenes" class="scenes" aria-label="Scenes"></nav>
+      <input id="scene-filter" type="search" placeholder="Find a scene…" autocomplete="off" aria-label="Find a scene">
+      <nav id="scenes" class="tree" aria-label="Sections and scenes"></nav>
     </aside>
     <main class="content">
       <div class="content-head">

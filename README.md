@@ -195,9 +195,15 @@ translate in the browser, and see each other's work live. It runs on **GitHub Pa
   replies on a line you worked on, or mentions you – click to jump to the line. You see who's
   online, and who's on which scene right now. A scene, section or the whole project reaching
   100% gets a small celebration.
-- **Welcome page extras:** the team's latest activity, your recent translations (click to go
-  back to one), your 🔥 streak of days in a row, and the team's weekly goal (set per project in
-  *Admin → Projects*).
+- **Welcome page extras:** an **activity calendar** like GitHub's – one square per day, darker
+  for more translations, reviews, votes and notes; switch between *You* and the *Team*, hover a day
+  for its numbers – with your 🔥 translation streak next to it. Also the team's latest activity,
+  your recent translations (click to go back to one), and on each project the team's translations
+  this week against its weekly goal (set per project in *Admin → Projects*).
+- **The sections list** on the left opens one section at a time. Each section shows how far it is
+  (percentage and a thin bar); each scene a mark: ✓ complete, ⚑ waiting for review (with how
+  many), ◐ partly translated, ○ not started – plus ✋ when someone is on it. *Find a scene*
+  searches every section.
 - **Theme and app:** Auto / Light / Dark in the menu under your initials. On a phone, *Add to
   Home Screen* installs the site as an app with its own icon.
 - **Updating an older database:** a database set up before a feature existed needs its update run

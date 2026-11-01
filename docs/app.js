@@ -410,7 +410,6 @@ async function loadProjects() {
     $("#title").textContent = "No project yet";
     $("#crumb").textContent = "";
     $("#scenes").textContent = "";
-    $("#group-select").textContent = "";
     $("#lines").append(el("p", "empty", me.is_admin
       ? "Open Admin → Projects → Import a game file to start."
       : "The admin hasn't added a game file yet."));
@@ -515,52 +514,93 @@ function renderProgress() {
   renderScenes();
 }
 
+// ---------- the sidebar: sections that open to their scenes ----------
+let openGroups = new Set(); // sections shown open in the sidebar
+
 function renderGroups(groups, chosen) {
-  const sel = $("#group-select");
-  sel.textContent = "";
-  for (const g of groups) {
-    const c = sum(stats.filter((s) => s.grp === g));
-    const o = el("option", "", `${g || "All lines"} — ${c.untranslated || c.review ? `${c.done}/${c.total}` : "✓"}`);
-    o.value = g;
-    sel.append(o);
-  }
-  if (chosen != null) sel.value = chosen;
+  openGroups = new Set(chosen != null ? [chosen] : groups.slice(0, 1));
 }
 
 function renderGroupStats() {
-  const g = $("#group-select").value;
-  $("#group-stats").textContent = progressText(sum(stats.filter((s) => s.grp === g)));
   const c = sum(stats);
+  $("#group-stats").textContent = c.total ? (c.untranslated || c.review ? `${Math.floor(100 * c.done / c.total)}% approved` : "✓ complete") : "";
+  $("#group-stats").title = progressText(c);
   $("#review-all").textContent = c.review ? `⚑ Everything waiting for review (${c.review.toLocaleString()})` : "⚑ Nothing waiting for review";
   $("#review-all").disabled = !c.review;
 }
 
+/** A thin approved / waiting bar. */
+function miniBar(c, cls = "scene-bar") {
+  const bar = el("span", cls);
+  bar.setAttribute("aria-hidden", "true");
+  const d = el("i", "done"), r = el("i", "review");
+  d.style.width = c.total ? `${100 * c.done / c.total}%` : "0";
+  r.style.width = c.total ? `${100 * c.review / c.total}%` : "0";
+  bar.append(d, r);
+  return bar;
+}
+
+const SCENE_MARK = { complete: ["✓", "complete"], review: ["⚑", "waiting for review"], partly: ["◐", "partly translated"], open: ["○", "not started"] };
+
+function sceneMark(s) {
+  if (sceneState(s) === "complete") return "complete";
+  if (Number(s.review)) return "review";
+  return Number(s.done) ? "partly" : "open";
+}
+
 function renderScenes() {
   const nav = $("#scenes");
-  const g = $("#group-select").value;
   const q = $("#scene-filter").value.trim().toLowerCase();
+  const keep = nav.scrollTop;
   nav.textContent = "";
-  for (const s of stats.filter((x) => x.grp === g && (!q || x.scene.toLowerCase().includes(q)))) {
-    const b = el("button", `scene is-${sceneState(s)}`);
-    b.type = "button";
-    if (view && view.grp === s.grp && view.scene === s.scene) b.classList.add("active");
-    b.append(el("span", "scene-title", s.scene || "(no scene)"));
-    const meta = el("span", "scene-meta");
-    const st = sceneState(s);
-    meta.append(st === "complete" ? el("span", "done", "✓ Complete") : el("span", "", `${s.done}/${s.total}`));
-    if (Number(s.review)) meta.append(el("span", "flag", `⚑ ${s.review}`));
-    for (const c of claims.filter((c) => c.grp === s.grp && c.scene === s.scene)) meta.append(el("span", "claimed", `✋ ${c.user_name}`));
-    for (const u of presenceIn(s)) meta.append(avatar(u.name));
-    const bar = el("span", "scene-bar");
-    bar.setAttribute("aria-hidden", "true");
-    const d = el("i", "done"), r = el("i", "review");
-    d.style.width = `${100 * s.done / s.total}%`;
-    r.style.width = `${100 * s.review / s.total}%`;
-    bar.append(d, r);
-    b.append(meta, bar);
-    b.addEventListener("click", () => openScene(s.grp, s.scene));
-    nav.append(b);
+  const groups = [...new Set(stats.map((s) => s.grp))];
+  for (const g of groups) {
+    const inGroup = stats.filter((s) => s.grp === g);
+    const shown = q ? inGroup.filter((s) => (s.scene || "").toLowerCase().includes(q) || (g || "").toLowerCase().includes(q)) : inGroup;
+    if (!shown.length) continue;
+    const c = sum(inGroup);
+    const open = !!q || openGroups.has(g);
+    const sec = el("div", "sec" + (open ? " open" : "") + (view?.grp === g ? " current" : ""));
+    const head = el("button", "sec-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(open));
+    const done = !c.untranslated && !c.review && c.total;
+    head.append(el("span", "sec-chevron", "›"), el("span", "sec-name", g || "All lines"),
+      el("span", "sec-pct" + (done ? " done" : ""), done ? "✓" : `${Math.floor(100 * c.done / c.total)}%`));
+    head.title = `${g || "All lines"}: ${progressText(c)} · ${inGroup.length} scene${inGroup.length === 1 ? "" : "s"}`;
+    head.addEventListener("click", () => { // one section open at a time keeps the list short
+      openGroups = openGroups.has(g) ? new Set() : new Set([g]);
+      renderScenes();
+    });
+    sec.append(head, miniBar(c, "sec-bar"));
+    if (open) {
+      const list = el("div", "sec-scenes");
+      for (const s of shown) {
+        const mark = sceneMark(s);
+        const b = el("button", `scene is-${mark}`);
+        b.type = "button";
+        if (view && view.grp === s.grp && view.scene === s.scene) { b.classList.add("active"); b.setAttribute("aria-current", "true"); }
+        const [icon, word] = SCENE_MARK[mark];
+        b.setAttribute("aria-label", `${s.scene || "(no scene)"}: ${word}, ${s.done} of ${s.total} approved${Number(s.review) ? `, ${s.review} waiting` : ""}`);
+        const extra = el("span", "scene-extra");
+        for (const cl of claims.filter((x) => x.grp === s.grp && x.scene === s.scene)) {
+          const hand = el("span", "claimed", "✋");
+          hand.title = `${cl.user_name} is working on this scene`;
+          extra.append(hand);
+        }
+        for (const u of presenceIn(s)) extra.append(avatar(u.name));
+        b.append(el("span", `scene-mark m-${mark}`, icon), el("span", "scene-title", s.scene || "(no scene)"), extra,
+          el("span", "scene-count", mark === "complete" ? "" : Number(s.review) ? `⚑ ${s.review}` : `${s.done}/${s.total}`));
+        b.title = `${s.scene || "(no scene)"} – ${s.done}/${s.total} approved${Number(s.review) ? ` · ${s.review} waiting for review` : ""}${Number(s.untranslated) ? ` · ${s.untranslated} untranslated` : ""}`;
+        b.addEventListener("click", () => openScene(s.grp, s.scene));
+        list.append(b);
+      }
+      sec.append(list);
+    }
+    nav.append(sec);
   }
+  if (!nav.childElementCount) nav.append(el("p", "empty small", q ? "No scene by that name." : ""));
+  nav.scrollTop = keep;
 }
 
 // ---------- lines ----------
@@ -568,8 +608,9 @@ async function openScene(grp, scene) {
   view = { grp, scene };
   localSet("view." + project.id, JSON.stringify(view));
   $("#search").value = "";
-  if ($("#group-select").value !== grp) { $("#group-select").value = grp; renderGroupStats(); }
+  openGroups = new Set([grp]);
   renderScenes();
+  $("#scenes .scene.active")?.scrollIntoView({ block: "nearest" });
   $("#crumb").textContent = grp || "";
   $("#title").textContent = scene || "(no scene)";
   renderClaim();
@@ -1380,19 +1421,16 @@ function renderClock() {
   $("#project-clock").hidden = !start;
   if (!start) return;
   let left = Math.max(0, Math.floor((Date.now() - start.at) / 1000));
-  const box = $("#clock-value");
-  box.textContent = "";
-  for (const [one, many, size, pad] of [["year", "years", 365 * 86400, false], ["day", "days", 86400, false],
-                                        ["hour", "hours", 3600, true], ["minute", "minutes", 60, true], ["second", "seconds", 1, true]]) {
+  const parts = [];
+  for (const [unit, size, pad] of [["y", 365 * 86400, false], ["d", 86400, false], ["h", 3600, true], ["m", 60, true], ["s", 1, true]]) {
     const n = Math.floor(left / size);
     left -= n * size;
-    if (one === "year" && !n) continue; // years only once there is one
-    const unit = el("span", "clock-unit");
-    unit.append(el("span", "clock-num", pad ? String(n).padStart(2, "0") : String(n)), el("span", "clock-name", n === 1 ? one : many));
-    box.append(unit);
+    if (unit === "y" && !n) continue; // years only once there is one
+    parts.push(`${pad && parts.length ? String(n).padStart(2, "0") : n}${unit}`);
   }
-  box.setAttribute("aria-label", `${box.innerText.replace(/\n/g, " ")}`);
-  $("#clock-since").textContent = `since ${start.at.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })} – ${start.what}`;
+  $("#clock-value").textContent = parts.join(" ");
+  $("#clock-since").textContent = `· since ${start.at.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}`;
+  $("#project-clock").title = `Counting from ${start.at.toLocaleString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" })} – ${start.what}`;
 }
 
 function tickHome() {
@@ -1410,7 +1448,7 @@ async function renderHome() {
   renderOnline();
   renderActivity().catch(() => {});
   renderRecent().catch(() => {});
-  renderGoal().catch(() => {});
+  renderCalendar().catch(() => {});
   const cards = $("#home-projects");
   if (!projects.length) {
     $("#home-overall").hidden = true;
@@ -1425,7 +1463,7 @@ async function renderHome() {
   }
   const reviewer = me.can_review || me.is_admin;
   const voter = reviewer && !actingAdmin();
-  const [prog, myClaims, waiting, toReview, thisWeek, voteRows] = await Promise.all([
+  const [prog, myClaims, waiting, toReview, thisWeek, voteRows, weekly] = await Promise.all([
     projectProgress(),
     must(sb.from("claims").select("*").eq("user_id", me.id)),
     count(sb.from("versions").select("id", { count: "exact", head: true }).eq("author", me.id).eq("status", "pending")),
@@ -1433,6 +1471,8 @@ async function renderHome() {
       .or(`author.is.null,author.neq.${me.id}`)) : Promise.resolve(null),
     count(sb.from("versions").select("id", { count: "exact", head: true }).eq("author", me.id).gte("created_at", mondayISO())),
     voter ? sb.rpc("need_my_vote").then(({ data, error }) => (error ? null : data)) : Promise.resolve(null),
+    Promise.all(projects.map((p) => count(sb.from("versions").select("id", { count: "exact", head: true })
+      .eq("project_id", p.id).gte("created_at", mondayISO())).catch(() => 0))),
   ]);
   if (current !== "home") return;
   const of = (p) => {
@@ -1458,7 +1498,7 @@ async function renderHome() {
     const card = el("section", "card project-card" + (project?.id === p.id ? " current" : ""));
     const head = el("div", "pc-head");
     head.append(el("h3", "", p.name), el("span", "muted small", `into ${p.target_label} · ${fmt(c.total)} lines`));
-    card.append(head, bigPercent(c), progressBar(c, `${p.name} finished`), progressLegend(c));
+    card.append(head, bigPercent(c), progressBar(c, `${p.name} finished`), progressLegend(c), weekGoalLine(p, weekly[projects.indexOf(p)]));
     const claimsHere = myClaims.filter((x) => Number(x.project_id) === p.id);
     if (claimsHere.length) {
       const on = el("div", "pc-claims small");
@@ -2097,46 +2137,157 @@ async function renderRecent() {
   }
 }
 
-/** Days in a row (up to today, or yesterday if you haven't worked yet today) with at least one translation. */
-async function myStreak() {
-  const since = new Date(Date.now() - 90 * 86400e3).toISOString();
-  const rows = await must(sb.from("versions").select("created_at").eq("author", me.id).gte("created_at", since)).catch(() => []);
-  const days = new Set(rows.map((r) => new Date(r.created_at).toLocaleDateString("sv")));
-  const d = new Date();
-  if (!days.has(d.toLocaleDateString("sv"))) d.setDate(d.getDate() - 1);
-  let n = 0;
-  while (days.has(d.toLocaleDateString("sv"))) { n++; d.setDate(d.getDate() - 1); }
-  return { n, today: days.has(new Date().toLocaleDateString("sv")) };
+/** A project card's slim line: the team's translations this week, against the weekly goal if there is one. */
+function weekGoalLine(p, week) {
+  const goal = Number(p.weekly_goal || 0);
+  const line = el("div", "pc-goal small");
+  if (!goal) {
+    line.append(el("span", "muted", `${fmt(week)} translation${week === 1 ? "" : "s"} by the team this week`));
+    return line;
+  }
+  const pct = Math.min(100, Math.round(100 * week / goal));
+  const bar = el("span", "goal-bar");
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-valuenow", String(pct));
+  bar.setAttribute("aria-label", `Weekly goal: ${week} of ${goal}`);
+  const fill = el("i");
+  fill.style.width = `${pct}%`;
+  bar.append(fill);
+  line.append(el("span", "muted", "This week"), bar, el("span", "", `${fmt(week)} / ${fmt(goal)}${week >= goal ? " 🎉" : ""}`));
+  return line;
 }
 
-async function renderGoal() {
-  const box = $("#home-goal");
-  const p = project || projects[0];
-  const [streak, week] = await Promise.all([
-    myStreak(),
-    p ? count(sb.from("versions").select("id", { count: "exact", head: true }).eq("project_id", p.id).gte("created_at", mondayISO())).catch(() => 0) : 0,
-  ]);
-  box.textContent = "";
-  const s = el("div", "goal-item");
-  s.append(el("span", "goal-big", streak.n ? `🔥 ${streak.n}` : "🔥 0"),
-    el("span", "muted small", streak.n ? `day${streak.n === 1 ? "" : "s"} in a row${streak.today ? "" : " – translate today to keep it"}` : "translate a line today to start a streak"));
-  box.append(s);
-  const goal = Number(p?.weekly_goal || 0);
-  const g = el("div", "goal-item goal-team");
-  if (goal) {
-    const pct = Math.min(100, Math.round(100 * week / goal));
-    const bar = el("div", "progress big");
-    bar.setAttribute("role", "progressbar");
-    bar.setAttribute("aria-valuenow", String(pct));
-    bar.setAttribute("aria-label", "Team goal this week");
-    const fill = el("span", "bar done");
-    fill.style.width = `${pct}%`;
-    bar.append(fill);
-    g.append(el("span", "small", `Team goal this week${projects.length > 1 ? ` · ${p.name}` : ""}: ${fmt(week)} of ${fmt(goal)} translations${week >= goal ? " 🎉" : ""}`), bar);
-  } else {
-    g.append(el("span", "muted small", `${fmt(week)} translations by the team this week.${actingAdmin() ? " Set a weekly goal in Admin → Projects." : ""}`));
+// ---------- welcome: activity calendar (like GitHub's) and the translation streak ----------
+let calRows = null;       // daily_activity rows of every project over the last year
+let calAt = 0;            // when they were loaded
+let calMode = localGet("cal") === "team" ? "team" : "me";
+
+async function loadCalendar() {
+  if (calRows && Date.now() - calAt < 60e3) return calRows;
+  const lists = await Promise.all(projects.map((p) =>
+    fetchAll(() => sb.rpc("daily_activity", { p_project: p.id, p_days: 365, p_tz: TZ }))));
+  calRows = lists.flat();
+  calAt = Date.now();
+  return calRows;
+}
+
+/** Per day: translations written, reviews and votes, notes – yours, or the whole team's. */
+function calendarDays(mode) {
+  const days = new Map();
+  for (const r of calRows) {
+    if (mode === "me" && r.name !== me.display_name) continue;
+    const d = days.get(r.day) || { written: 0, reviewed: 0, notes: 0 };
+    d.written += Number(r.written);
+    d.reviewed += Number(r.reviewed);
+    d.notes += Number(r.notes);
+    days.set(r.day, d);
   }
-  box.append(g);
+  return days;
+}
+
+/** Days in a row with at least one translation, up to today (or yesterday, if today hasn't started yet). */
+function translationStreak(days) {
+  const t = todayIso();
+  const wrote = (d) => (days.get(d)?.written || 0) > 0;
+  let d = wrote(t) ? t : addDays(t, -1);
+  let n = 0;
+  while (wrote(d)) { n++; d = addDays(d, -1); }
+  return { n, today: wrote(t) };
+}
+
+async function renderCalendar() {
+  const box = $("#calendar");
+  for (const b of $$("[data-cal]")) b.setAttribute("aria-pressed", String(b.dataset.cal === calMode));
+  if (!projects.length) {
+    box.textContent = "";
+    $("#cal-summary").textContent = "Activity shows up here once the admin adds a game file.";
+    return;
+  }
+  try {
+    await loadCalendar();
+  } catch {
+    box.textContent = "";
+    $("#cal-summary").textContent = "The activity calendar needs a database update (update-7-team-features.sql).";
+    $("#streak-chip").hidden = true;
+    return;
+  }
+  if (current !== "home") return;
+  const st = translationStreak(calendarDays("me"));
+  const chip = $("#streak-chip");
+  chip.hidden = false;
+  chip.classList.toggle("zero", !st.n);
+  chip.textContent = st.n ? `🔥 ${st.n}-day streak` : "🔥 No streak yet";
+  chip.title = st.n ? `${st.n} day${st.n === 1 ? "" : "s"} in a row with a translation${st.today ? "" : " – translate today to keep it going"}`
+                    : "Translate a line today to start a streak";
+  drawCalendar(box, calendarDays(calMode));
+}
+
+function drawCalendar(box, days) {
+  box.textContent = "";
+  const CELL = 12, GAP = 3, LABELS = 30;
+  const weeks = Math.max(12, Math.min(53, Math.floor(((box.clientWidth || 640) - LABELS) / (CELL + GAP))));
+  const today = todayIso();
+  const start = addDays(mondayOf(today), -7 * (weeks - 1));
+  const total = (d) => (d ? d.written + d.reviewed + d.notes : 0);
+  let sumAll = 0, best = null;
+  for (let i = 0; i < weeks * 7; i++) {
+    const day = addDays(start, i);
+    if (day > today) break;
+    const v = total(days.get(day));
+    sumAll += v;
+    if (v && (!best || v > best.v)) best = { day, v };
+  }
+  const max = Math.max(1, best?.v || 0);
+  const level = (v) => (!v ? 0 : v <= max * 0.25 ? 1 : v <= max * 0.5 ? 2 : v <= max * 0.75 ? 3 : 4);
+
+  const grid = el("div", "cal-grid");
+  grid.style.gridTemplateColumns = `${LABELS - GAP}px repeat(${weeks}, ${CELL}px)`;
+  const place = (node, row, col, span = 1) => { node.style.gridArea = `${row} / ${col} / span 1 / span ${span}`; grid.append(node); };
+  let lastLabel = -9;
+  for (let w = 0; w < weeks; w++) {
+    const monday = addDays(start, 7 * w);
+    const prev = w ? addDays(monday, -7) : null;
+    // a month gets a label where it starts; the first column only if that month lasts 3+ more weeks
+    const newMonth = prev ? dayOf(monday).getMonth() !== dayOf(prev).getMonth()
+      : dayOf(addDays(monday, 14)).getMonth() === dayOf(monday).getMonth();
+    if (newMonth && w - lastLabel >= 3 && w <= weeks - 2) {
+      place(el("span", "cal-month", dayOf(monday).toLocaleDateString(undefined, { month: "short" })), 1, w + 2, 3);
+      lastLabel = w;
+    }
+  }
+  [[0, "Mon"], [2, "Wed"], [4, "Fri"]].forEach(([r, name]) => {
+    place(el("span", "cal-day", dayOf(addDays(start, r)).toLocaleDateString(undefined, { weekday: "short" }) || name), r + 2, 1);
+  });
+  for (let w = 0; w < weeks; w++) {
+    for (let r = 0; r < 7; r++) {
+      const day = addDays(start, 7 * w + r);
+      const d = days.get(day);
+      const cell = el("i", `cal-cell l${day > today ? "x" : level(total(d))}${day === today ? " today" : ""}`);
+      cell.dataset.day = day;
+      place(cell, r + 2, w + 2);
+    }
+  }
+  const tip = el("div", "chart-tip cal-tip");
+  tip.hidden = true;
+  grid.addEventListener("mouseover", (e) => {
+    const c = e.target.closest(".cal-cell");
+    if (!c || c.classList.contains("lx")) { tip.hidden = true; return; }
+    const d = days.get(c.dataset.day);
+    const when = dayOf(c.dataset.day).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+    tip.textContent = total(d)
+      ? `${when}\n${plural(d.written, "translation")} · ${plural(d.reviewed, "review")} · ${plural(d.notes, "note")}`
+      : `${when}\nNo activity`;
+    tip.hidden = false;
+    tip.style.left = `${c.offsetLeft + CELL / 2}px`;
+    tip.style.top = `${c.offsetTop - 6}px`;
+  });
+  grid.addEventListener("mouseleave", () => { tip.hidden = true; });
+  const who = calMode === "me" ? "Your" : "The team's";
+  grid.setAttribute("role", "img");
+  grid.setAttribute("aria-label", `${who} activity over the last ${weeks} weeks: ${fmt(sumAll)} contributions${best ? `, most on ${dayOf(best.day).toLocaleDateString()}` : ""}.`);
+  box.append(grid, tip);
+  $("#cal-summary").textContent = `${plural(sumAll, "contribution")} in the last ${weeks} weeks` +
+    (best ? ` · best day ${shortDate(best.day)} (${fmt(best.v)})` : "");
 }
 
 // ---------- theme: auto, light or dark ----------
@@ -2575,13 +2726,13 @@ async function loadDash(quiet = false) {
     let activity, progress, daily = true;
     try {
       [activity, progress] = await Promise.all([
-        must(sb.rpc("daily_activity", { p_project: p, p_days: DAYS_LOADED, p_tz: TZ })),
+        fetchAll(() => sb.rpc("daily_activity", { p_project: p, p_days: DAYS_LOADED, p_tz: TZ })),
         must(sb.rpc("daily_progress", { p_project: p, p_days: DAYS_LOADED, p_tz: TZ })),
       ]);
     } catch { // a database without update 7: weeks only
       daily = false;
       const [wa, wp] = await Promise.all([
-        must(sb.rpc("weekly_activity", { p_project: p, p_weeks: 13, p_tz: TZ })),
+        fetchAll(() => sb.rpc("weekly_activity", { p_project: p, p_weeks: 13, p_tz: TZ })),
         must(sb.rpc("weekly_progress", { p_project: p, p_weeks: 13, p_tz: TZ })),
       ]);
       activity = wa.map((r) => ({ ...r, day: r.week }));
@@ -2589,7 +2740,7 @@ async function loadDash(quiet = false) {
     }
     const weekAgo = new Date(Date.now() - 7 * 86400e3).toISOString();
     const [people, oldWaiting, review] = await Promise.all([
-      must(sb.rpc("people_stats", { p_project: p })),
+      fetchAll(() => sb.rpc("people_stats", { p_project: p })),
       sb.from("versions").select("id", { count: "exact", head: true })
         .eq("project_id", p).eq("status", "pending").lt("created_at", weekAgo)
         .then(({ count: n, error }) => { if (error) throw error; return n || 0; }),
@@ -3157,13 +3308,6 @@ function init() {
     const p = projects.find((x) => x.id === Number(e.target.value));
     if (p) openProject(p);
   });
-  $("#group-select").addEventListener("change", () => {
-    renderGroupStats();
-    renderScenes();
-    const g = $("#group-select").value;
-    const first = stats.find((s) => s.grp === g && (s.untranslated || s.review)) || stats.find((s) => s.grp === g);
-    if (first) openScene(first.grp, first.scene);
-  });
   $("#scene-filter").addEventListener("input", renderScenes);
   $("#filter").addEventListener("change", () => { if (view) loadLines(); });
   let searchTimer;
@@ -3237,6 +3381,16 @@ function init() {
   });
   $("#gl-export").addEventListener("click", exportGlossary);
   $("#update-reload").addEventListener("click", reloadSite);
+  $$("[data-cal]").forEach((b) => b.addEventListener("click", () => {
+    calMode = b.dataset.cal;
+    localSet("cal", calMode);
+    renderCalendar().catch(() => {});
+  }));
+  let calFrame;
+  new ResizeObserver(() => {
+    cancelAnimationFrame(calFrame);
+    calFrame = requestAnimationFrame(() => { if (calRows && current === "home") drawCalendar($("#calendar"), calendarDays(calMode)); });
+  }).observe($("#calendar"));
   setInterval(tickHome, 1000); // the clock and the time on the welcome page
   checkForUpdate();
   setInterval(checkForUpdate, 5 * 60 * 1000);
