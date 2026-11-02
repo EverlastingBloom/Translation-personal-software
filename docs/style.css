@@ -240,6 +240,8 @@ code { font-family: Consolas, ui-monospace, monospace; font-size: .9em; backgrou
 .chip.approved { border-color: var(--done); color: var(--done); }
 .history summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 .editor { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.line.sending .editor textarea { opacity: .6; cursor: progress; }
+.line.sending .editor .primary { pointer-events: none; opacity: .6; }
 .editor textarea { width: 100%; min-height: 3.2em; resize: vertical; field-sizing: content; line-height: 1.45; }
 .editor-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
 .tag-warn { color: var(--warn); font-size: 13px; }

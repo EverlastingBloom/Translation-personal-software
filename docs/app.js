@@ -680,10 +680,40 @@ async function refreshLines(ids, flash = false) {
     lines[i] = l;
     const old = $(`.line[data-id="${l.id}"]`);
     if (!old) continue;
+    if (old.querySelector(".reason-form")) continue; // you're writing why you disagree: redraw after the vote
     const card = renderLine(l);
+    keepTyping(old, card);
     old.replaceWith(card);
+    restoreFocus(card);
     if (flash) card.classList.add("flash");
   }
+}
+
+/** A line is redrawn when anyone changes it. Whatever you were typing there stays: the translation
+    (it's in `drafts`), a note you hadn't sent, and where your cursor was. */
+let focusToRestore = null;
+function keepTyping(old, card) {
+  const note = old.querySelector(".note-form input"), newNote = card.querySelector(".note-form input");
+  if (note && newNote && note.value) newNote.value = note.value;
+  if (sending.has(Number(card.dataset.id))) {
+    card.classList.add("sending");
+    const box = card.querySelector(".editor textarea");
+    if (box) box.readOnly = true;
+  }
+  const a = document.activeElement;
+  focusToRestore = a && old.contains(a) && (a.matches(".editor textarea") || a.matches(".note-form input"))
+    ? { which: a.matches("textarea") ? ".editor textarea" : ".note-form input", value: a.value, start: a.selectionStart, end: a.selectionEnd }
+    : null;
+}
+function restoreFocus(card) {
+  const f = focusToRestore;
+  focusToRestore = null;
+  if (!f) return;
+  const el2 = card.querySelector(f.which);
+  if (!el2) return;
+  if (el2.value !== f.value) { el2.value = f.value; el2.dispatchEvent(new Event("input", { bubbles: true })); }
+  el2.focus({ preventScroll: true });
+  try { el2.setSelectionRange(f.start, f.end); } catch { /* not a text field */ }
 }
 
 /** An empty list that says what to do next, instead of just "nothing here". */
@@ -857,6 +887,11 @@ function renderEditor(l, approved) {
   const wrap = el("div", "editor");
   const ta = el("textarea");
   ta.rows = 2;
+  // no autocorrect: phone keyboards and Windows would "fix" Indonesian words into other words
+  ta.spellcheck = false;
+  ta.setAttribute("autocorrect", "off");
+  ta.setAttribute("autocapitalize", "off");
+  ta.setAttribute("autocomplete", "off");
   ta.placeholder = approved ? "Suggest a better translation…" : "Your translation…";
   ta.value = drafts[l.id] ?? (mine ? mine.text : "");
   const foot = el("div", "editor-foot");
@@ -925,27 +960,39 @@ function renderNotes(l) {
   return box;
 }
 
+const sending = new Set(); // lines whose translation is on its way to the server
+
+/** Sends a translation. With `next` (Ctrl+Enter) the cursor moves on at once – before the save
+    finishes – so whatever you type next lands in the next line, never in the one being sent. */
 async function submit(l, text, next) {
-  if (!text.trim()) return;
+  if (!text.trim() || sending.has(l.id)) return; // one send per line at a time: no duplicates
+  l = lines.find((x) => x.id === l.id) || l;     // the latest copy (it may have changed since it was drawn)
   const approved = l.versions.find((v) => v.status === "approved");
   if (approved && approved.text === text) { toast("That's already the approved translation."); return; }
   const mine = myPending(l);
+  const card = $(`.line[data-id="${l.id}"]`);
+  sending.add(l.id);
+  card?.classList.add("sending");
+  const box = card?.querySelector(".editor textarea");
+  if (box) box.readOnly = true;
+  if (next && card) {
+    const cards = $$("#lines .line");
+    const i = cards.indexOf(card);
+    const target = cards.slice(i + 1).find((c) => !c.classList.contains("is-done")) || cards[i + 1];
+    if (target) focusLine(target.dataset.id);
+  }
   try {
     if (mine) await must(sb.from("versions").update({ text }).eq("id", mine.id));
     else await must(sb.from("versions").insert({ project_id: project.id, line_id: l.id, text }));
     delete drafts[l.id];
-    await refreshLines([l.id]);
-    scheduleStats();
-    if (next) {
-      const cards = $$(".line");
-      const i = cards.findIndex((c) => c.dataset.id === String(l.id));
-      const target = cards.slice(i + 1).find((c) => !c.classList.contains("is-done")) || cards[i + 1];
-      target?.querySelector("textarea")?.focus();
-      target?.scrollIntoView({ block: "center", behavior: "smooth" });
-    }
   } catch (err) {
+    drafts[l.id] = text; // keep what you typed
     toast(explain(err), true);
+  } finally {
+    sending.delete(l.id);
   }
+  await refreshLines([l.id]).catch(() => {});
+  scheduleStats();
 }
 
 // ---------- voting: 2/3 of the people who can vote approve; the admin decides directly ----------
